@@ -258,6 +258,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfalace"
+version = "0.1.0"
+dependencies = [
+ "bstr 1.9.1",
+ "clap",
+ "gfa",
+ "handlegraph",
+]
+
+[[package]]
 name = "handlegraph"
 version = "0.7.0-alpha.9"
 source = "git+https://github.com/chfi/rs-handlegraph?branch=master#3ac575e4216ce16a16667503a8875e469a40a97a"
@@ -344,16 +354,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da0df0e5185db44f69b44f26786fe401b6c293d1907744beaa7fa62b2e5a517a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "pgglace"
-version = "0.1.0"
-dependencies = [
- "bstr 1.9.1",
- "clap",
- "gfa",
- "handlegraph",
 ]
 
 [[package]]
