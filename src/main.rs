@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use clap::Parser;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
-use handlegraph::pathhandlegraph::*;
+use handlegraph::pathhandlegraph::{IntoPathIds, GraphPathNames, GraphPathsRef, MutableGraphPaths, PathSteps, PathStep};
 use handlegraph::hashgraph::HashGraph;
+//use handlegraph::pathhandlegraph::PathStep;
 use gfa::{gfa::GFA, parser::GFAParser};
 
 #[derive(Parser, Debug)]
@@ -39,13 +38,20 @@ fn main() {
 
             graph.path_ids()
                 .filter_map(|path_id| {
-                    let path_name = graph.get_path_name(path_id)?.to_vec();
-                    let path_name_str = std::str::from_utf8(&path_name).ok()?;
+                    // Assuming get_path_name returns an Option of an iterator, you can do this
+                    let path_name = if let Some(name_iter) = graph.get_path_name(path_id) {
+                        name_iter.collect::<Vec<u8>>()
+                    } else {
+                        // Handle the case where get_path_name returns None, perhaps by returning an error or using a default value
+                        Vec::new() // For example, using an empty Vec<u8> as a default
+                    };
+                    // Then, you can convert the Vec<u8> into a &str
+                    let path_name_str = std::str::from_utf8(&path_name).unwrap();
                     if let Some((genome, hap, chr, start, end)) = parse_path_name(path_name_str) {
-                        let steps: Vec<PathStep> = graph
+                        let steps: Vec<LacePathStep> = graph
                             .get_path_ref(path_id)?
-                            .iter()
-                            .map(|step| PathStep {
+                            .steps()
+                            .map(|step| LacePathStep {
                                 block_id: smoothed_block_graphs.len() - 1,
                                 node_id: step.handle().id(),
                             })
@@ -61,7 +67,7 @@ fn main() {
                 })
                 .collect::<Vec<_>>()
         })
-        .flatten()
+        //.flatten()
         .collect::<Vec<_>>();
 
     let smoothed_graph = lace_smoothed_blocks(&smoothed_block_graphs, &path_ranges);
@@ -70,10 +76,10 @@ fn main() {
 
 pub struct PathRange {
     pub path_name: String,
-    pub steps: Vec<PathStep>,
+    pub steps: Vec<LacePathStep>,
 }
 
-pub struct PathStep {
+pub struct LacePathStep {
     pub block_id: usize,
     pub node_id: NodeId,
 }
@@ -88,10 +94,10 @@ pub fn lace_smoothed_blocks(
     // Copy nodes and edges from the smoothed blocks to the smoothed graph
     for (block_id, smoothed_block) in smoothed_block_graphs.iter().enumerate() {
         for handle in smoothed_block.handles() {
-            let new_node_id = smoothed_graph.create_handle(smoothed_block.sequence(&handle).to_vec(), handle.id().into());
+            let sequence = smoothed_block.sequence(handle).collect::<Vec<_>>();
+            let new_node_id = smoothed_graph.create_handle::<usize>(&sequence.into_boxed_slice(), handle.id().into());
             block_id_to_smoothed_id[block_id].insert(handle.id(), new_node_id.into());
         }
-
         for edge in smoothed_block.edges() {
             smoothed_graph.create_edge(edge);
         }
@@ -108,16 +114,21 @@ pub fn lace_smoothed_blocks(
     }
 
     // Connect the path steps in the smoothed graph
-    smoothed_graph.with_all_paths_mut_ctx(|_, _, path_ref| {
+    let mut edges = Vec::new();
+    for path_id in smoothed_graph.path_ids() {
         let mut prev_step = None;
-        for step in path_ref.iter() {
+        for step in smoothed_graph.get_path_ref(path_id).unwrap().nodes.iter() {
             if let Some(prev) = prev_step {
-                smoothed_graph.create_edge(Edge(prev, step));
+                edges.push(Edge(prev, *step));
             }
-            prev_step = Some(step);
+            prev_step = Some(*step);
         }
-    });
-
+    }
+    // Create edges collected in previous step
+    for edge in edges {
+        smoothed_graph.create_edge(edge);
+    }
+        
     smoothed_graph
 }
 
