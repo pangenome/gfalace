@@ -47,7 +47,7 @@ fn main() {
                     };
                     // Then, you can convert the Vec<u8> into a &str
                     let path_name_str = std::str::from_utf8(&path_name).unwrap();
-                    if let Some((genome, hap, chr, start, end)) = parse_path_name(path_name_str) {
+                    if let Some((_genome, _hap, _chr, _start, _end)) = parse_path_name(path_name_str) {
                         let steps: Vec<LacePathStep> = graph
                             .get_path_ref(path_id)?
                             .steps()
@@ -70,7 +70,7 @@ fn main() {
         //.flatten()
         .collect::<Vec<_>>();
 
-    let smoothed_graph = lace_smoothed_blocks(&smoothed_block_graphs, &path_ranges);
+    let _smoothed_graph = lace_smoothed_blocks(&smoothed_block_graphs, &path_ranges);
     // ... (further processing or output of the smoothed graph)
 }
 
