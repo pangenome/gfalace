@@ -38,20 +38,20 @@ fn main() {
         let block_graph = HashGraph::from_gfa(&gfa);
 
         // Record the id translation for this block
-        let id_translation = combined_graph.node_count() as NodeId;
+        let id_translation = NodeId::from(combined_graph.node_count());
         id_translations.push(id_translation);
 
         // Add nodes with translated IDs
         for handle in block_graph.handles() {
             let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            combined_graph.create_handle(&sequence, id_translation + handle.id());
+            combined_graph.create_handle(&sequence, id_translation + handle.id().into());
         }
 
         // Add edges with translated IDs
         for edge in block_graph.edges() {
             let translated_edge = Edge(
-                Handle::pack(id_translation + edge.0.id(), edge.0.is_reverse()),
-                Handle::pack(id_translation + edge.1.id(), edge.1.is_reverse())
+                Handle::pack(id_translation + edge.0.id().into(), edge.0.is_reverse()),
+                Handle::pack(id_translation + edge.1.id().into(), edge.1.is_reverse())
             );
             combined_graph.create_edge(translated_edge);
         }
@@ -75,50 +75,11 @@ fn main() {
         ranges.sort_by_key(|r| (r.start, r.end));
     }
 
-    let path_ranges = args
-        .gfa_list
-        .iter()
-        .flat_map(|gfa_path| {
-            let parser = GFAParser::new();
-            let gfa: GFA<usize, ()> = parser.parse_file(gfa_path).unwrap();
-            let graph = HashGraph::from_gfa(&gfa);
-
-            graph.path_ids()
-                .filter_map(|path_id| {
-                    // Assuming get_path_name returns an Option of an iterator, you can do this
-                    let path_name = if let Some(name_iter) = graph.get_path_name(path_id) {
-                        name_iter.collect::<Vec<u8>>()
-                    } else {
-                        // Handle the case where get_path_name returns None, perhaps by returning an error or using a default value
-                        Vec::new() // For example, using an empty Vec<u8> as a default
-                    };
-                    // Then, you can convert the Vec<u8> into a &str
-                    let path_name_str = std::str::from_utf8(&path_name).unwrap();
-                    if let Some((_genome, _hap, _chr, _start, _end)) = parse_path_name(path_name_str) {
-                        let steps: Vec<LacePathStep> = graph
-                            .get_path_ref(path_id)?
-                            .steps()
-                            .map(|step| LacePathStep {
-                                block_id: smoothed_block_graphs.len() - 1,
-                                node_id: step.handle().id(),
-                            })
-                            .collect();
-
-                        Some(PathRange {
-                            path_name: path_name_str.to_string(),
-                            steps,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        //.flatten()
-        .collect::<Vec<_>>();
-
-    let _smoothed_graph = lace_smoothed_blocks(&smoothed_block_graphs, &path_ranges);
-    // ... (further processing or output of the smoothed graph)
+    // Print some statistics about the combined graph
+    println!("Combined graph statistics:");
+    println!("  Nodes: {}", combined_graph.node_count());
+    println!("  Edges: {}", combined_graph.edge_count());
+    println!("Number of unique path keys: {}", path_key_ranges.len());
 }
 
 pub struct PathRange {
