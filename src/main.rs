@@ -222,7 +222,7 @@ fn main() {
 
      // Write the combined graph to GFA file
     match write_graph_to_gfa(&combined_graph, &args.output) {
-        Ok(_) => println!("Successfully wrote combined graph to {}", args.output),
+        Ok(_) => eprintln!("Successfully wrote combined graph to {}", args.output),
         Err(e) => eprintln!("Error writing GFA file: {}", e),
     }
 }
