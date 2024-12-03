@@ -1,11 +1,11 @@
-use std::collections::{HashMap, BTreeMap, BTreeSet};
+use std::collections::{HashMap, BTreeMap};
 use clap::Parser;
 use std::fs::File;
 use std::io::Write;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
-use handlegraph::pathhandlegraph::{IntoPathIds, GraphPathNames, GraphPathsRef, MutableGraphPaths, PathSteps, PathStep};
+use handlegraph::pathhandlegraph::{IntoPathIds, GraphPathNames, GraphPathsRef, MutableGraphPaths, GraphPaths};
 use handlegraph::hashgraph::HashGraph;
 //use handlegraph::pathhandlegraph::PathStep;
 use gfa::{gfa::GFA, parser::GFAParser};
@@ -211,7 +211,7 @@ fn main() {
     }
 
     println!("Path creation completed");
-    println!("Number of paths in combined graph: {}", combined_graph.path_count());
+    println!("Number of paths in combined graph: {}", GraphPaths::path_count(&combined_graph));
     // Print some statistics about the combined graph
     // println!("Combined graph statistics:");
     // println!("  Nodes: {}", combined_graph.node_count());
