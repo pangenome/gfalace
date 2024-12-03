@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, BTreeSet};
 use clap::Parser;
 use std::fs::File;
 use std::io::Write;
@@ -23,10 +23,17 @@ struct Args {
 }
 
 #[derive(Debug)]
+#[derive(Debug)]
 struct RangeInfo {
     start: usize,
     end: usize,
     gfa_id: usize,
+    steps: Vec<Handle>,  // Store the path steps for this range
+}
+
+// Helper function to check if two ranges are contiguous
+fn is_contiguous(r1: &RangeInfo, r2: &RangeInfo) -> bool {
+    r1.end == r2.start
 }
 
 fn print_graph_details(graph: &HashGraph) {
@@ -147,25 +154,65 @@ fn main() {
             combined_graph.create_edge(translated_edge);
         }
 
-        // Process paths and collect ranges
+        // Process paths and collect ranges with their steps
         for path_id in block_graph.path_ids() {
             if let Some(name_iter) = block_graph.get_path_name(path_id) {
                 let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>()).unwrap();
                 
                 if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
+                    // Get the path steps and translate their IDs
+                    let mut translated_steps = Vec::new();
+                    if let Some(path_ref) = block_graph.get_path_ref(path_id) {
+                        for step in path_ref.nodes.iter() {
+                            let translated_id = id_translation + step.id().into();
+                            translated_steps.push(Handle::pack(translated_id, step.is_reverse()));
+                        }
+                    }
+                    
                     path_key_ranges.entry(sample_hap_name)
                         .or_insert_with(Vec::new)
-                        .push(RangeInfo { start, end, gfa_id });
+                        .push(RangeInfo { 
+                            start, 
+                            end, 
+                            gfa_id,
+                            steps: translated_steps,
+                        });
                 }
             }
         }
     }
 
-    // Sort ranges for each key
-    for ranges in path_key_ranges.values_mut() {
+    // Sort ranges and create merged paths in the combined graph
+    for (path_key, ranges) in path_key_ranges.iter_mut() {
+        // Sort ranges by start position
         ranges.sort_by_key(|r| (r.start, r.end));
+        
+        // Create the path in the combined graph
+        let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
+        
+        // Merge contiguous ranges and add their steps
+        let mut current_range_idx = 0;
+        while current_range_idx < ranges.len() {
+            let mut steps = ranges[current_range_idx].steps.clone();
+            let mut next_idx = current_range_idx + 1;
+            
+            // Keep merging while ranges are contiguous
+            while next_idx < ranges.len() && is_contiguous(&ranges[next_idx - 1], &ranges[next_idx]) {
+                steps.extend(ranges[next_idx].steps.clone());
+                next_idx += 1;
+            }
+            
+            // Add all steps from the merged ranges to the path
+            for step in steps {
+                combined_graph.path_append_step(path_id, step);
+            }
+            
+            current_range_idx = next_idx;
+        }
     }
-    println!("id_translations: {:?}", id_translations);
+
+    println!("Path creation completed");
+    println!("Number of paths in combined graph: {}", combined_graph.path_count());
     // Print some statistics about the combined graph
     // println!("Combined graph statistics:");
     // println!("  Nodes: {}", combined_graph.node_count());
