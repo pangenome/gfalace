@@ -12,7 +12,7 @@ use gfa::{gfa::GFA, parser::GFAParser};
 #[clap(author, version, about)]
 struct Args {
     /// List of GFA file paths.
-    #[clap(short, long, value_parser)]
+    #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
     gfa_list: Vec<String>,
 }
 
@@ -25,6 +25,9 @@ struct RangeInfo {
 
 fn main() {
     let args = Args::parse();
+
+    println!("gfa_list = {:?}", args.gfa_list);
+    
     
     // Create a single combined graph
     let mut combined_graph = HashGraph::new();
