@@ -129,8 +129,9 @@ fn main() {
     let mut id_translations = Vec::new();
 
     // Process each GFA file
+    let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
-        let parser = GFAParser::new();
+        
         let gfa: GFA<usize, ()> = parser.parse_file(gfa_path).unwrap();
         let block_graph = HashGraph::from_gfa(&gfa);
 
@@ -154,8 +155,7 @@ fn main() {
             combined_graph.create_edge(translated_edge);
         }
         
-        eprintln!("GFA file {}: Added {} nodes", gfa_id, block_graph.node_count());
-        eprintln!("GFA file {}: Added {} edges", gfa_id, block_graph.edge_count());
+        eprintln!("GFA file {} processed: Added {} nodes and {} edges", gfa_id, block_graph.node_count(), block_graph.edge_count());
 
         // Process paths and collect ranges with their steps
         for path_id in block_graph.path_ids() {
@@ -212,8 +212,8 @@ fn main() {
             
             current_range_idx = next_idx;
         }
-        eprintln!("Created path '{}' with {} steps", path_key, combined_graph.path_len(path_id).unwrap_or(0));
     }
+
     eprintln!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
 
     // println!("Number of paths in combined graph: {}", GraphPaths::path_count(&combined_graph));
