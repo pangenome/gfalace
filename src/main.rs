@@ -189,36 +189,62 @@ fn main() {
         // Sort ranges by start position
         ranges.sort_by_key(|r| (r.start, r.end));
         
-        // Create the path in the combined graph
-        let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
+        // Check if all ranges are contiguous
+        let all_contiguous = ranges.windows(2).all(|w| is_contiguous(&w[0], &w[1]));
         
-        // Merge contiguous ranges and add their steps
-        let mut current_range_idx = 0;
-        while current_range_idx < ranges.len() {
-            let mut steps = ranges[current_range_idx].steps.clone();
-            let mut next_idx = current_range_idx + 1;
-            
-            // Keep merging while ranges are contiguous
-            while next_idx < ranges.len() && is_contiguous(&ranges[next_idx - 1], &ranges[next_idx]) {
-                steps.extend(ranges[next_idx].steps.clone());
-                next_idx += 1;
-            }
-            
-            // Add all steps from the merged ranges to the path
+        if all_contiguous {
+            // Create a single path with the original key
+            let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
             let mut prev_step = None;
-            for step in steps {
-                combined_graph.path_append_step(path_id, step);
-                
-                // Create edge between consecutive steps if it doesn't exist
-                if let Some(prev) = prev_step {
-                    if !combined_graph.has_edge(prev, step) {
-                        combined_graph.create_edge(Edge(prev, step));
-                    }
-                }
-                prev_step = Some(step);
-            }
             
-            current_range_idx = next_idx;
+            // Add all steps from all ranges
+            for range in ranges.iter() {
+                for step in &range.steps {
+                    combined_graph.path_append_step(path_id, *step);
+                    
+                    if let Some(prev) = prev_step {
+                        if !combined_graph.has_edge(prev, *step) {
+                            combined_graph.create_edge(Edge(prev, *step));
+                        }
+                    }
+                    prev_step = Some(*step);
+                }
+            }
+        } else {
+            // Handle non-contiguous ranges by creating separate paths for each contiguous group
+            let mut current_range_idx = 0;
+            while current_range_idx < ranges.len() {
+                let start_range = &ranges[current_range_idx];
+                let mut steps = start_range.steps.clone();
+                let mut next_idx = current_range_idx + 1;
+                let mut end_range = start_range;
+                
+                // Merge contiguous ranges
+                while next_idx < ranges.len() && is_contiguous(&ranges[next_idx - 1], &ranges[next_idx]) {
+                    steps.extend(ranges[next_idx].steps.clone());
+                    end_range = &ranges[next_idx];
+                    next_idx += 1;
+                }
+                
+                // Create path name with range information
+                let path_name = format!("{}:{}-{}", path_key, start_range.start, end_range.end);
+                let path_id = combined_graph.create_path(path_name.as_bytes(), false).unwrap();
+                
+                // Add steps to the path
+                let mut prev_step = None;
+                for step in steps {
+                    combined_graph.path_append_step(path_id, step);
+                    
+                    if let Some(prev) = prev_step {
+                        if !combined_graph.has_edge(prev, step) {
+                            combined_graph.create_edge(Edge(prev, step));
+                        }
+                    }
+                    prev_step = Some(step);
+                }
+                
+                current_range_idx = next_idx;
+            }
         }
     }
 
