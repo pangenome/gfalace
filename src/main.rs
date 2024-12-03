@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use clap::Parser;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
@@ -16,17 +16,64 @@ struct Args {
     gfa_list: Vec<String>,
 }
 
+#[derive(Debug)]
+struct RangeInfo {
+    start: usize,
+    end: usize,
+    gfa_id: usize,
+}
+
 fn main() {
     let args = Args::parse();
-    let smoothed_block_graphs = args
-        .gfa_list
-        .iter()
-        .map(|gfa_path| {
-            let parser = GFAParser::new();
-            let gfa: GFA<usize, ()> = parser.parse_file(gfa_path).unwrap();
-            HashGraph::from_gfa(&gfa)
-        })
-        .collect::<Vec<_>>();
+    
+    // Create a single combined graph
+    let mut combined_graph = HashGraph::new();
+    let mut path_key_ranges: BTreeMap<String, Vec<RangeInfo>> = BTreeMap::new();
+    let mut id_translations = Vec::new();
+
+    // Process each GFA file
+    for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
+        let parser = GFAParser::new();
+        let gfa: GFA<usize, ()> = parser.parse_file(gfa_path).unwrap();
+        let block_graph = HashGraph::from_gfa(&gfa);
+
+        // Record the id translation for this block
+        let id_translation = combined_graph.node_count() as NodeId;
+        id_translations.push(id_translation);
+
+        // Add nodes with translated IDs
+        for handle in block_graph.handles() {
+            let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
+            combined_graph.create_handle(&sequence, id_translation + handle.id());
+        }
+
+        // Add edges with translated IDs
+        for edge in block_graph.edges() {
+            let translated_edge = Edge(
+                Handle::pack(id_translation + edge.0.id(), edge.0.is_reverse()),
+                Handle::pack(id_translation + edge.1.id(), edge.1.is_reverse())
+            );
+            combined_graph.create_edge(translated_edge);
+        }
+
+        // Process paths and collect ranges
+        for path_id in block_graph.path_ids() {
+            if let Some(name_iter) = block_graph.get_path_name(path_id) {
+                let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>()).unwrap();
+                
+                if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
+                    path_key_ranges.entry(sample_hap_name)
+                        .or_insert_with(Vec::new)
+                        .push(RangeInfo { start, end, gfa_id });
+                }
+            }
+        }
+    }
+
+    // Sort ranges for each key
+    for ranges in path_key_ranges.values_mut() {
+        ranges.sort_by_key(|r| (r.start, r.end));
+    }
 
     let path_ranges = args
         .gfa_list
@@ -132,19 +179,19 @@ pub fn lace_smoothed_blocks(
     smoothed_graph
 }
 
-fn parse_path_name(path_name: &str) -> Option<(String, usize, String, usize, usize)> {
+fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
     let parts: Vec<&str> = path_name.split('#').collect();
     if parts.len() == 3 {
-        let genome = parts[0].to_string();
-        let hap = parts[1].parse().ok()?;
+        let key_parts = vec![parts[0], parts[1]];
         let chr_range: Vec<&str> = parts[2].split(':').collect();
         if chr_range.len() == 2 {
-            let chr = chr_range[0].to_string();
+            let name = chr_range[0];
             let range: Vec<&str> = chr_range[1].split('-').collect();
             if range.len() == 2 {
                 let start = range[0].parse().ok()?;
                 let end = range[1].parse().ok()?;
-                return Some((genome, hap, chr, start, end));
+                let key = format!("{}#{}", key_parts.join("#"), name);
+                return Some((key, start, end));
             }
         }
     }
