@@ -165,7 +165,7 @@ fn main() {
     for ranges in path_key_ranges.values_mut() {
         ranges.sort_by_key(|r| (r.start, r.end));
     }
-
+    println!("id_translations: {:?}", id_translations);
     // Print some statistics about the combined graph
     // println!("Combined graph statistics:");
     // println!("  Nodes: {}", combined_graph.node_count());
