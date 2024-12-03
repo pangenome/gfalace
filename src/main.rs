@@ -131,7 +131,6 @@ fn main() {
     // Process each GFA file
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
-        
         let gfa: GFA<usize, ()> = parser.parse_file(gfa_path).unwrap();
         let block_graph = HashGraph::from_gfa(&gfa);
 
