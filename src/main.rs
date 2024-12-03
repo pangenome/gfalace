@@ -23,7 +23,6 @@ struct Args {
 }
 
 #[derive(Debug)]
-#[derive(Debug)]
 struct RangeInfo {
     start: usize,
     end: usize,
