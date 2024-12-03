@@ -20,6 +20,10 @@ struct Args {
     /// Output GFA file path
     #[clap(short, long, value_parser)]
     output: String,
+
+    /// Enable debug output
+    #[clap(short, long)]
+    debug: bool,
 }
 
 #[derive(Debug)]
@@ -192,6 +196,14 @@ fn main() {
         // Check if all ranges are contiguous
         let all_contiguous = ranges.windows(2).all(|w| is_contiguous(&w[0], &w[1]));
         
+        if !all_contiguous && args.debug {
+            eprintln!("Warning: Non-contiguous ranges detected for path key '{}':", path_key);
+            for (i, range) in ranges.iter().enumerate() {
+                eprintln!("  Range {}: start={}, end={}, gfa_id={}", 
+                    i + 1, range.start, range.end, range.gfa_id);
+            }
+        }
+
         if all_contiguous {
             // Create a single path with the original key
             let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
