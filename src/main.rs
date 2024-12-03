@@ -158,7 +158,9 @@ fn main() {
             combined_graph.create_edge(translated_edge);
         }
         
-        eprintln!("GFA file {} processed: Added {} nodes and {} edges", gfa_id, block_graph.node_count(), block_graph.edge_count());
+        if args.debug {
+            eprintln!("GFA file {} ({}) processed: Added {} nodes and {} edges", gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
+        }
 
         // Process paths and collect ranges with their steps
         for path_id in block_graph.path_ids() {
@@ -260,7 +262,9 @@ fn main() {
         }
     }
 
-    eprintln!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
+    if args.debug {
+        eprintln!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
+    }
 
     // println!("Number of paths in combined graph: {}", GraphPaths::path_count(&combined_graph));
     // Print some statistics about the combined graph
@@ -274,7 +278,7 @@ fn main() {
 
      // Write the combined graph to GFA file
     match write_graph_to_gfa(&combined_graph, &args.output) {
-        Ok(_) => eprintln!("Successfully wrote combined graph to {}", args.output),
+        Ok(_) => if args.debug {eprintln!("Successfully wrote combined graph to {}", args.output)},
         Err(e) => eprintln!("Error writing GFA file: {}", e),
     }
 }
