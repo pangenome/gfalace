@@ -210,8 +210,7 @@ fn main() {
         }
     }
 
-    println!("Path creation completed");
-    println!("Number of paths in combined graph: {}", GraphPaths::path_count(&combined_graph));
+    // println!("Number of paths in combined graph: {}", GraphPaths::path_count(&combined_graph));
     // Print some statistics about the combined graph
     // println!("Combined graph statistics:");
     // println!("  Nodes: {}", combined_graph.node_count());
