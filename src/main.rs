@@ -1,5 +1,7 @@
 use std::collections::{HashMap, BTreeMap};
 use clap::Parser;
+use std::fs::File;
+use std::io::Write;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
@@ -14,6 +16,10 @@ struct Args {
     /// List of GFA file paths.
     #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
     gfa_list: Vec<String>,
+
+    /// Output GFA file path
+    #[clap(short, long, value_parser)]
+    output: String,
 }
 
 #[derive(Debug)]
@@ -23,12 +29,94 @@ struct RangeInfo {
     gfa_id: usize,
 }
 
+fn print_graph_details(graph: &HashGraph) {
+    println!("\nDetailed Graph Information:");
+    
+    // Print all node IDs and their sequences
+    println!("\nNodes:");
+    for handle in graph.handles() {
+        let sequence = graph.sequence(handle).collect::<Vec<_>>();
+        let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| "Invalid UTF-8".to_string());
+        println!("  Node ID: {}, Sequence: {}", handle.id(), sequence_str);
+    }
+    
+    // Print all edges
+    println!("\nEdges:");
+    for edge in graph.edges() {
+        println!("  Edge: {} ({}) -> {} ({})",
+            edge.0.id(),
+            if edge.0.is_reverse() { "reverse" } else { "forward" },
+            edge.1.id(),
+            if edge.1.is_reverse() { "reverse" } else { "forward" }
+        );
+    }
+}
+
+fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
+    let mut file = File::create(output_path)?;
+    
+    // Write GFA version
+    writeln!(file, "H\tVN:Z:1.0")?;
+    
+    // Collect and sort nodes by ID
+    let mut nodes: Vec<Handle> = graph.handles().collect();
+    nodes.sort_by_key(|handle| handle.id());
+    
+    // Write sorted nodes (Segments)
+    for handle in nodes {
+        let sequence = graph.sequence(handle).collect::<Vec<_>>();
+        let sequence_str = String::from_utf8(sequence)
+            .unwrap_or_else(|_| String::from("N"));
+        writeln!(file, "S\t{}\t{}", handle.id(), sequence_str)?;
+    }
+    
+    // Collect and sort edges
+    let mut edges: Vec<Edge> = graph.edges().collect();
+    edges.sort_by(|a, b| {
+        a.0.id().cmp(&b.0.id())
+            .then(a.1.id().cmp(&b.1.id()))
+    });
+    
+    // Write sorted edges (Links)
+    for edge in edges {
+        let from_id = edge.0.id();
+        let to_id = edge.1.id();
+        let from_orient = if edge.0.is_reverse() { "-" } else { "+" };
+        let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
+        writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
+    }
+    
+    // Collect and sort paths by name
+    let mut paths: Vec<_> = graph.path_ids().collect();
+    paths.sort_by_key(|&path_id| {
+        graph.get_path_name(path_id)
+            .map(|name_iter| name_iter.collect::<Vec<u8>>())
+            .unwrap_or_default()
+    });
+    
+    // Write sorted paths
+    for path_id in paths {
+        if let Some(name_iter) = graph.get_path_name(path_id) {
+            let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>())
+                .unwrap_or_else(|_| String::from("unknown_path"));
+            
+            let mut path_elements = Vec::new();
+            if let Some(path_ref) = graph.get_path_ref(path_id) {
+                for handle in &path_ref.nodes {
+                    let orient = if handle.is_reverse() { "-" } else { "+" };
+                    path_elements.push(format!("{}{}", handle.id(), orient));
+                }
+            }
+            
+            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+        }
+    }
+    
+    Ok(())
+}
 fn main() {
     let args = Args::parse();
 
-    println!("gfa_list = {:?}", args.gfa_list);
-    
-    
     // Create a single combined graph
     let mut combined_graph = HashGraph::new();
     let mut path_key_ranges: BTreeMap<String, Vec<RangeInfo>> = BTreeMap::new();
@@ -79,10 +167,19 @@ fn main() {
     }
 
     // Print some statistics about the combined graph
-    println!("Combined graph statistics:");
-    println!("  Nodes: {}", combined_graph.node_count());
-    println!("  Edges: {}", combined_graph.edge_count());
-    println!("Number of unique path keys: {}", path_key_ranges.len());
+    // println!("Combined graph statistics:");
+    // println!("  Nodes: {}", combined_graph.node_count());
+    // println!("  Edges: {}", combined_graph.edge_count());
+    // println!("Number of unique path keys: {}", path_key_ranges.len());
+
+    // Print detailed information about nodes and edges
+    //print_graph_details(&combined_graph);
+
+     // Write the combined graph to GFA file
+    match write_graph_to_gfa(&combined_graph, &args.output) {
+        Ok(_) => println!("Successfully wrote combined graph to {}", args.output),
+        Err(e) => eprintln!("Error writing GFA file: {}", e),
+    }
 }
 
 pub struct PathRange {
