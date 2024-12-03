@@ -206,8 +206,17 @@ fn main() {
             }
             
             // Add all steps from the merged ranges to the path
+            let mut prev_step = None;
             for step in steps {
                 combined_graph.path_append_step(path_id, step);
+                
+                // Create edge between consecutive steps if it doesn't exist
+                if let Some(prev) = prev_step {
+                    if !combined_graph.has_edge(prev, step) {
+                        combined_graph.create_edge(Edge(prev, step));
+                    }
+                }
+                prev_step = Some(step);
             }
             
             current_range_idx = next_idx;
