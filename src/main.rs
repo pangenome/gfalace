@@ -141,7 +141,9 @@ fn main() {
         // Add nodes with translated IDs
         for handle in block_graph.handles() {
             let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            combined_graph.create_handle(&sequence, id_translation + handle.id().into());
+            let new_id = id_translation + handle.id().into();
+            combined_graph.create_handle(&sequence, new_id);
+            eprintln!("Created node {} with sequence length {}", new_id, sequence.len());
         }
 
         // Add edges with translated IDs
@@ -151,6 +153,12 @@ fn main() {
                 Handle::pack(id_translation + edge.1.id().into(), edge.1.is_reverse())
             );
             combined_graph.create_edge(translated_edge);
+            eprintln!("Created edge: {} ({}) -> {} ({})",
+                translated_edge.0.id(),
+                if translated_edge.0.is_reverse() { "rev" } else { "fwd" },
+                translated_edge.1.id(),
+                if translated_edge.1.is_reverse() { "rev" } else { "fwd" }
+            );
         }
 
         // Process paths and collect ranges with their steps
@@ -188,6 +196,7 @@ fn main() {
         
         // Create the path in the combined graph
         let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
+        eprintln!("Created path '{}' with ID {}", path_key, path_id.0);
         
         // Merge contiguous ranges and add their steps
         let mut current_range_idx = 0;
@@ -204,6 +213,11 @@ fn main() {
             // Add all steps from the merged ranges to the path
             for step in steps {
                 combined_graph.path_append_step(path_id, step);
+                eprintln!("Added step to path '{}': {} ({})", 
+                    path_key,
+                    step.id(),
+                    if step.is_reverse() { "rev" } else { "fwd" }
+                );
             }
             
             current_range_idx = next_idx;
