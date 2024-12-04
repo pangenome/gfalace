@@ -159,7 +159,7 @@ fn main() {
                     }
                     
                     path_key_ranges.entry(sample_hap_name)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(RangeInfo { 
                             start, 
                             end, 
@@ -353,7 +353,7 @@ pub fn lace_smoothed_blocks(
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
     let parts: Vec<&str> = path_name.split('#').collect();
     if parts.len() == 3 {
-        let key_parts = vec![parts[0], parts[1]];
+        let key_parts = [parts[0], parts[1]];
         let chr_range: Vec<&str> = parts[2].split(':').collect();
         if chr_range.len() == 2 {
             let name = chr_range[0];
