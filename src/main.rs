@@ -39,6 +39,10 @@ fn is_contiguous(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.end == r2.start
 }
 
+fn has_overlap(r1: &RangeInfo, r2: &RangeInfo) -> bool {
+    r1.start < r2.end && r2.start < r1.end
+}
+
 fn print_graph_details(graph: &HashGraph) {
     println!("\nDetailed Graph Information:");
     
@@ -195,11 +199,24 @@ fn main() {
         // Sort ranges by start position
         ranges.sort_by_key(|r| (r.start, r.end));
         
-        // Check if all ranges are contiguous
-        let all_contiguous = ranges.windows(2).all(|w| is_contiguous(&w[0], &w[1]));
+        // Check for overlaps and contiguity
+        let mut has_overlaps = false;
+        let mut all_contiguous = true;
         
-        if !all_contiguous && args.debug {
-            eprintln!("\nPath key '{}' merged ranges:", path_key);
+        for window in ranges.windows(2) {
+            if has_overlap(&window[0], &window[1]) {
+                has_overlaps = true;
+            }
+            if !is_contiguous(&window[0], &window[1]) {
+                all_contiguous = false;
+            }
+        }
+        
+        if (has_overlaps || !all_contiguous) && args.debug {
+            eprintln!("\nPath key '{}' ranges analysis:", path_key);
+            if has_overlaps {
+                eprintln!("  Warning: Contains overlapping ranges!");
+            }
             
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
@@ -231,7 +248,7 @@ fn main() {
                 current_start, current_end, current_gfa_ids);
         }
 
-        if all_contiguous {
+        if all_contiguous && !has_overlaps {
             // Create a single path with the original key
             let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
             let mut prev_step = None;
