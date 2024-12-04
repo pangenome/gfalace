@@ -7,13 +7,13 @@ GFALace is a Rust tool that combines multiple GFA (Graphical Fragment Assembly) 
 Requires Rust 2021 edition or later. Install using:
 
 ```bash
-cargo install --git https://github.com/YOUR_USERNAME/gfalace
+cargo install --git https://github.com/pangenome/gfalace
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/gfalace
+git clone https://github.com/pangenome/gfalace
 cd gfalace
 cargo build --release
 ```
