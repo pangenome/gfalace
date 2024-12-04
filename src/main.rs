@@ -43,29 +43,6 @@ fn has_overlap(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.start < r2.end && r2.start < r1.end
 }
 
-fn print_graph_details(graph: &HashGraph) {
-    println!("\nDetailed Graph Information:");
-    
-    // Print all node IDs and their sequences
-    println!("\nNodes:");
-    for handle in graph.handles() {
-        let sequence = graph.sequence(handle).collect::<Vec<_>>();
-        let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| "Invalid UTF-8".to_string());
-        println!("  Node ID: {}, Sequence: {}", handle.id(), sequence_str);
-    }
-    
-    // Print all edges
-    println!("\nEdges:");
-    for edge in graph.edges() {
-        println!("  Edge: {} ({}) -> {} ({})",
-            edge.0.id(),
-            if edge.0.is_reverse() { "reverse" } else { "forward" },
-            edge.1.id(),
-            if edge.1.is_reverse() { "reverse" } else { "forward" }
-        );
-    }
-}
-
 fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
     let mut file = File::create(output_path)?;
     
@@ -308,17 +285,7 @@ fn main() {
         eprintln!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
     }
 
-    // println!("Number of paths in combined graph: {}", GraphPaths::path_count(&combined_graph));
-    // Print some statistics about the combined graph
-    // println!("Combined graph statistics:");
-    // println!("  Nodes: {}", combined_graph.node_count());
-    // println!("  Edges: {}", combined_graph.edge_count());
-    // println!("Number of unique path keys: {}", path_key_ranges.len());
-
-    // Print detailed information about nodes and edges
-    //print_graph_details(&combined_graph);
-
-     // Write the combined graph to GFA file
+    // Write the combined graph to GFA file
     match write_graph_to_gfa(&combined_graph, &args.output) {
         Ok(_) => if args.debug {eprintln!("Successfully wrote combined graph to {}", args.output)},
         Err(e) => eprintln!("Error writing GFA file: {}", e),
