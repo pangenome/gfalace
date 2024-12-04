@@ -199,11 +199,36 @@ fn main() {
         let all_contiguous = ranges.windows(2).all(|w| is_contiguous(&w[0], &w[1]));
         
         if !all_contiguous && args.debug {
-            eprintln!("Warning: Non-contiguous ranges detected for path key '{}':", path_key);
-            for (i, range) in ranges.iter().enumerate() {
-                eprintln!("  Range {}: start={}, end={}, gfa_id={}", 
-                    i + 1, range.start, range.end, range.gfa_id);
+            eprintln!("\nPath key '{}' merged ranges:", path_key);
+            
+            let mut current_start = ranges[0].start;
+            let mut current_end = ranges[0].end;
+            let mut current_gfa_ids = vec![ranges[0].gfa_id];
+            
+            for i in 1..ranges.len() {
+                if is_contiguous(&ranges[i-1], &ranges[i]) {
+                    // Extend current merged range
+                    current_end = ranges[i].end;
+                    current_gfa_ids.push(ranges[i].gfa_id);
+                } else {
+                    // Print current merged range
+                    eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
+                        current_start, current_end, current_gfa_ids);
+                    
+                    // Calculate and print gap
+                    let gap = ranges[i].start - current_end;
+                    eprintln!("    Gap to next range: {} positions", gap);
+                    
+                    // Start new merged range
+                    current_start = ranges[i].start;
+                    current_end = ranges[i].end;
+                    current_gfa_ids = vec![ranges[i].gfa_id];
+                }
             }
+            
+            // Print final merged range
+            eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
+                current_start, current_end, current_gfa_ids);
         }
 
         if all_contiguous {
