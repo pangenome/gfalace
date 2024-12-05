@@ -29,8 +29,10 @@ gfalace -g *.gfa -o combined.gfa
 or
 
 ```bash
-gfalace -g file1.gfa file2.gfa file3.gfa -o combined.gfa
+gfalace -g file1.gfa file2.gfa.gz file3.gfa -o combined.gfa
 ```
+
+GFALace supports both uncompressed (.gfa) and gzip-compressed (.gfa.gz) input files. You can freely mix compressed and uncompressed files in the input.
 
 The input GFA files can be provided in any order. This is because GFALace uses the coordinate information embedded in the path names (CHROM:START-END) to determine the correct ordering and relationships between sequences.
 
@@ -56,7 +58,7 @@ The tool uses these coordinates to:
 
 ## Features
 
-- Combines multiple GFA files while preserving path information
+- Combines multiple GFA files (both .gfa and .gfa.gz) while preserving path information
 - Translates node IDs to avoid conflicts
 - Creates edges between contiguous path segments
 - Handles both contiguous and non-contiguous ranges

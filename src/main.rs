@@ -1,7 +1,9 @@
 use std::collections::{HashMap, BTreeMap};
 use clap::Parser;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Write, BufReader};
+use std::path::Path;
+use flate2::read::GzDecoder;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
@@ -116,7 +118,14 @@ fn main() {
     // Process each GFA file
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
-        let gfa: GFA<usize, ()> = parser.parse_file(gfa_path).unwrap();
+        let gfa: GFA<usize, ()> = if gfa_path.ends_with(".gz") {
+            let file = File::open(gfa_path).unwrap();
+            let gz = GzDecoder::new(file);
+            let reader = BufReader::new(gz);
+            parser.parse_reader(reader).unwrap()
+        } else {
+            parser.parse_file(gfa_path).unwrap()
+        };
         let block_graph = HashGraph::from_gfa(&gfa);
 
         // Record the id translation for this block
