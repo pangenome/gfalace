@@ -39,8 +39,33 @@ fn is_contiguous(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.end == r2.start
 }
 
+// Helper function to check if two ranges overlap
 fn has_overlap(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.start < r2.end && r2.start < r1.end
+}
+
+// Helper function to read GFA file
+fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> std::io::Result<GFA<usize, ()>> {
+    if gfa_path.ends_with(".gz") {
+        let file = std::fs::File::open(gfa_path)?;
+        let (mut reader, _format) = niffler::get_reader(Box::new(file)).unwrap();
+        
+        let mut decompressed = Vec::new();
+        reader.read_to_end(&mut decompressed)?;
+        
+        let temp_path = format!("{}.tmp", gfa_path);
+        {
+            let mut temp_file = std::fs::File::create(&temp_path)?;
+            temp_file.write_all(&decompressed)?;
+        }
+        
+        let result = parser.parse_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path)?;
+        
+        Ok(result)
+    } else {
+        Ok(parser.parse_file(gfa_path).unwrap())
+    }
 }
 
 fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
@@ -116,32 +141,7 @@ fn main() {
     // Process each GFA file
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
-        let gfa: GFA<usize, ()> = if gfa_path.ends_with(".gz") {
-            // Open the file and check compression
-            let file = File::open(gfa_path).unwrap();
-            let (mut reader, _format) = niffler::get_reader(Box::new(file)).unwrap();
-            
-            // Read decompressed content
-            let mut decompressed = Vec::new();
-            reader.read_to_end(&mut decompressed).unwrap();
-            
-            // Write to temporary file
-            let temp_path = format!("{}.tmp", gfa_path);
-            {
-                let mut temp_file = File::create(&temp_path).unwrap();
-                temp_file.write_all(&decompressed).unwrap();
-            }
-            
-            // Parse the temporary file
-            let result = parser.parse_file(&temp_path).unwrap();
-            
-            // Clean up
-            std::fs::remove_file(&temp_path).unwrap();
-            
-            result
-        } else {
-            parser.parse_file(gfa_path).unwrap()
-        };
+        let gfa = read_gfa(gfa_path, &parser).unwrap();
         let block_graph = HashGraph::from_gfa(&gfa);
 
         // Record the id translation for this block
