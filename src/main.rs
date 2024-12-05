@@ -379,18 +379,16 @@ pub fn lace_smoothed_blocks(
 }
 
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
-    let parts: Vec<&str> = path_name.split('#').collect();
-    if parts.len() == 3 {
-        let key_parts = [parts[0], parts[1]];
-        let chr_range: Vec<&str> = parts[2].split(':').collect();
-        if chr_range.len() == 2 {
-            let name = chr_range[0];
-            let range: Vec<&str> = chr_range[1].split('-').collect();
-            if range.len() == 2 {
-                let start = range[0].parse().ok()?;
-                let end = range[1].parse().ok()?;
-                let key = format!("{}#{}", key_parts.join("#"), name);
-                return Some((key, start, end));
+    // Find the last ':' to split the range from the key
+    if let Some(last_colon) = path_name.rfind(':') {
+        let (key, range_str) = path_name.split_at(last_colon);
+        // Skip the ':' character
+        let range_str = &range_str[1..];
+        
+        // Find the '-' in the range portion
+        if let Some((start_str, end_str)) = range_str.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start_str.parse(), end_str.parse()) {
+                return Some((key.to_string(), start, end));
             }
         }
     }
