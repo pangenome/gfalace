@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 bstr = "1.9.1"
+niffler = "2.5.0"
 clap = { version = "4.5.2", features = ["derive"] }
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", branch = "master" }
 gfa = "0.10.1"

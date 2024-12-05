@@ -119,14 +119,13 @@ fn main() {
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
         let gfa: GFA<usize, ()> = if gfa_path.ends_with(".gz") {
-            // Read compressed file into memory
-            let mut compressed = Vec::new();
-            let mut file = File::open(gfa_path).unwrap();
-            file.read_to_end(&mut compressed).unwrap();
+            // Open the file and check compression
+            let file = File::open(gfa_path).unwrap();
+            let mut reader = niffler::get_reader(Box::new(file)).unwrap();
             
-            // Decompress
+            // Read decompressed content
             let mut decompressed = Vec::new();
-            GzDecoder::new(&compressed[..]).read_to_end(&mut decompressed).unwrap();
+            reader.read_to_end(&mut decompressed).unwrap();
             
             // Write to temporary file
             let temp_path = format!("{}.tmp", gfa_path);
