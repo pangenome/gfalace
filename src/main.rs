@@ -196,6 +196,12 @@ fn main() {
         }
     }
 
+    if args.debug {
+        eprintln!("Total nodes in combined graph: {}", combined_graph.node_count());
+        eprintln!("Total edges in combined graph: {}", combined_graph.edge_count());
+        eprintln!("Total path ranges collected: {}", path_key_ranges.len());
+    }
+
     // Sort ranges and create merged paths in the combined graph
     for (path_key, ranges) in path_key_ranges.iter_mut() {
         // Sort ranges by start position
@@ -215,7 +221,7 @@ fn main() {
         }
         
         if (has_overlaps || !all_contiguous) && args.debug {
-            eprintln!("\nPath key '{}' ranges analysis:", path_key);
+            eprintln!("  Path key '{}' ranges analysis:", path_key);
             
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
@@ -228,17 +234,17 @@ fn main() {
                     current_gfa_ids.push(ranges[i].gfa_id);
                 } else {
                     // Print current merged range
-                    eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
+                    eprintln!("    Merged range: start={}, end={}, gfa_ids={:?}", 
                         current_start, current_end, current_gfa_ids);
                     
                     if !has_overlap(&ranges[i-1], &ranges[i]) {
                         // Calculate and print gap
                         let gap = ranges[i].start - current_end;
-                        eprintln!("    Gap to next range: {} positions", gap);
+                        eprintln!("      Gap to next range: {} positions", gap);
                     } else {
                         // Calculate and print overlap
                         let overlap = current_end - ranges[i].start;
-                        eprintln!("    Overlap with next range: {} positions", overlap);
+                        eprintln!("      Overlap with next range: {} positions", overlap);
                     }
 
                     // Start new merged range
@@ -249,7 +255,7 @@ fn main() {
             }
             
             // Print final merged range
-            eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
+            eprintln!("    Merged range: start={}, end={}, gfa_ids={:?}", 
                 current_start, current_end, current_gfa_ids);
         }
 
