@@ -216,9 +216,6 @@ fn main() {
         
         if (has_overlaps || !all_contiguous) && args.debug {
             eprintln!("\nPath key '{}' ranges analysis:", path_key);
-            if has_overlaps {
-                eprintln!("  Warning: Contains overlapping ranges!");
-            }
             
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
@@ -234,10 +231,16 @@ fn main() {
                     eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
                         current_start, current_end, current_gfa_ids);
                     
-                    // Calculate and print gap
-                    let gap = ranges[i].start - current_end;
-                    eprintln!("    Gap to next range: {} positions", gap);
-                    
+                    if !has_overlap(&ranges[i-1], &ranges[i]) {
+                        // Calculate and print gap
+                        let gap = ranges[i].start - current_end;
+                        eprintln!("    Gap to next range: {} positions", gap);
+                    } else {
+                        // Calculate and print overlap
+                        let overlap = current_end - ranges[i].start;
+                        eprintln!("    Overlap with next range: {} positions", overlap);
+                    }
+
                     // Start new merged range
                     current_start = ranges[i].start;
                     current_end = ranges[i].end;
