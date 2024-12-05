@@ -21,6 +21,7 @@ cargo build --release
 ## Usage
 
 Basic usage:
+
 ```bash
 gfalace -g *.gfa -o combined.gfa
 ```
@@ -30,6 +31,8 @@ or
 ```bash
 gfalace -g file1.gfa file2.gfa file3.gfa -o combined.gfa
 ```
+
+The input GFA files can be provided in any order. This is because GFALace uses the coordinate information embedded in the path names (CHROM:START-END) to determine the correct ordering and relationships between sequences.
 
 Options:
 - `-g, --gfa-list`: List of input GFA files (space-separated)
