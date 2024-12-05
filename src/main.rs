@@ -3,7 +3,6 @@ use clap::Parser;
 use std::fs::File;
 use std::io::Write;
 use flate2::read::GzDecoder;
-use std::io::Read;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
@@ -121,7 +120,7 @@ fn main() {
         let gfa: GFA<usize, ()> = if gfa_path.ends_with(".gz") {
             // Open the file and check compression
             let file = File::open(gfa_path).unwrap();
-            let mut reader = niffler::get_reader(Box::new(file)).unwrap();
+            let (mut reader, _format) = niffler::get_reader(Box::new(file)).unwrap();
             
             // Read decompressed content
             let mut decompressed = Vec::new();
