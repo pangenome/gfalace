@@ -32,7 +32,7 @@ or
 gfalace -g file1.gfa file2.gfa.gz file3.gfa -o combined.gfa
 ```
 
-GFALace supports both uncompressed (.gfa) and gzip-compressed (.gfa.gz) input files. You can freely mix compressed and uncompressed files in the input.
+You can freely mix gzip-compressed (`.gfa.gz`) and uncompressed (`.gfa`) files in the input.
 
 The input GFA files can be provided in any order. This is because GFALace uses the coordinate information embedded in the path names (CHROM:START-END) to determine the correct ordering and relationships between sequences.
 
