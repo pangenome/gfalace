@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap};
 use clap::Parser;
 use std::fs::File;
 use std::io::Write;
@@ -318,64 +318,6 @@ fn main() {
         Ok(_) => if args.debug {eprintln!("Successfully wrote combined graph to {}", args.output)},
         Err(e) => eprintln!("Error writing GFA file: {}", e),
     }
-}
-
-pub struct PathRange {
-    pub path_name: String,
-    pub steps: Vec<LacePathStep>,
-}
-
-pub struct LacePathStep {
-    pub block_id: usize,
-    pub node_id: NodeId,
-}
-
-pub fn lace_smoothed_blocks(
-    smoothed_block_graphs: &[HashGraph],
-    path_ranges: &[PathRange],
-) -> HashGraph {
-    let mut smoothed_graph = HashGraph::new();
-    let mut block_id_to_smoothed_id: Vec<HashMap<NodeId, NodeId>> = vec![HashMap::new(); smoothed_block_graphs.len()];
-
-    // Copy nodes and edges from the smoothed blocks to the smoothed graph
-    for (block_id, smoothed_block) in smoothed_block_graphs.iter().enumerate() {
-        for handle in smoothed_block.handles() {
-            let sequence = smoothed_block.sequence(handle).collect::<Vec<_>>();
-            let new_node_id = smoothed_graph.create_handle::<usize>(&sequence.into_boxed_slice(), handle.id().into());
-            block_id_to_smoothed_id[block_id].insert(handle.id(), new_node_id.into());
-        }
-        for edge in smoothed_block.edges() {
-            smoothed_graph.create_edge(edge);
-        }
-    }
-
-    // Create paths in the smoothed graph based on the path ranges
-    for path_range in path_ranges {
-        let path_id = smoothed_graph.create_path(path_range.path_name.as_bytes(), false).unwrap();
-
-        for step in &path_range.steps {
-            let smoothed_node_id = block_id_to_smoothed_id[step.block_id][&step.node_id];
-            smoothed_graph.path_append_step(path_id, Handle::pack(smoothed_node_id, false));
-        }
-    }
-
-    // Connect the path steps in the smoothed graph
-    let mut edges = Vec::new();
-    for path_id in smoothed_graph.path_ids() {
-        let mut prev_step = None;
-        for step in smoothed_graph.get_path_ref(path_id).unwrap().nodes.iter() {
-            if let Some(prev) = prev_step {
-                edges.push(Edge(prev, *step));
-            }
-            prev_step = Some(*step);
-        }
-    }
-    // Create edges collected in previous step
-    for edge in edges {
-        smoothed_graph.create_edge(edge);
-    }
-        
-    smoothed_graph
 }
 
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
