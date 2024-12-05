@@ -2,7 +2,6 @@ use std::collections::{HashMap, BTreeMap};
 use clap::Parser;
 use std::fs::File;
 use std::io::Write;
-use flate2::read::GzDecoder;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
