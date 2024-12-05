@@ -22,6 +22,12 @@ cargo build --release
 
 Basic usage:
 ```bash
+gfalace -g *.gfa -o combined.gfa
+```
+
+or
+
+```bash
 gfalace -g file1.gfa file2.gfa file3.gfa -o combined.gfa
 ```
 
