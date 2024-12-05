@@ -1,9 +1,9 @@
 use std::collections::{HashMap, BTreeMap};
 use clap::Parser;
 use std::fs::File;
-use std::io::{Write, BufReader};
-use std::path::Path;
+use std::io::Write;
 use flate2::read::GzDecoder;
+use std::io::Read;
 use handlegraph::handle::{Handle, NodeId, Edge};
 use handlegraph::handlegraph::*;
 use handlegraph::mutablehandlegraph::*;
@@ -119,10 +119,29 @@ fn main() {
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
         let gfa: GFA<usize, ()> = if gfa_path.ends_with(".gz") {
-            let file = File::open(gfa_path).unwrap();
-            let gz = GzDecoder::new(file);
-            let reader = BufReader::new(gz);
-            parser.parse_reader(reader).unwrap()
+            // Read compressed file into memory
+            let mut compressed = Vec::new();
+            let mut file = File::open(gfa_path).unwrap();
+            file.read_to_end(&mut compressed).unwrap();
+            
+            // Decompress
+            let mut decompressed = Vec::new();
+            GzDecoder::new(&compressed[..]).read_to_end(&mut decompressed).unwrap();
+            
+            // Write to temporary file
+            let temp_path = format!("{}.tmp", gfa_path);
+            {
+                let mut temp_file = File::create(&temp_path).unwrap();
+                temp_file.write_all(&decompressed).unwrap();
+            }
+            
+            // Parse the temporary file
+            let result = parser.parse_file(&temp_path).unwrap();
+            
+            // Clean up
+            std::fs::remove_file(&temp_path).unwrap();
+            
+            result
         } else {
             parser.parse_file(gfa_path).unwrap()
         };
