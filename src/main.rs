@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap};
 use clap::Parser;
 use std::fs::File;
 use std::io::Write;
@@ -39,8 +39,33 @@ fn is_contiguous(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.end == r2.start
 }
 
+// Helper function to check if two ranges overlap
 fn has_overlap(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.start < r2.end && r2.start < r1.end
+}
+
+// Helper function to read GFA file
+fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> std::io::Result<GFA<usize, ()>> {
+    if gfa_path.ends_with(".gz") {
+        let file = std::fs::File::open(gfa_path)?;
+        let (mut reader, _format) = niffler::get_reader(Box::new(file)).unwrap();
+        
+        let mut decompressed = Vec::new();
+        reader.read_to_end(&mut decompressed)?;
+        
+        let temp_path = format!("{}.tmp", gfa_path);
+        {
+            let mut temp_file = std::fs::File::create(&temp_path)?;
+            temp_file.write_all(&decompressed)?;
+        }
+        
+        let result = parser.parse_file(&temp_path).unwrap();
+        std::fs::remove_file(&temp_path)?;
+        
+        Ok(result)
+    } else {
+        Ok(parser.parse_file(gfa_path).unwrap())
+    }
 }
 
 fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
@@ -116,32 +141,7 @@ fn main() {
     // Process each GFA file
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in args.gfa_list.iter().enumerate() {
-        let gfa: GFA<usize, ()> = if gfa_path.ends_with(".gz") {
-            // Open the file and check compression
-            let file = File::open(gfa_path).unwrap();
-            let (mut reader, _format) = niffler::get_reader(Box::new(file)).unwrap();
-            
-            // Read decompressed content
-            let mut decompressed = Vec::new();
-            reader.read_to_end(&mut decompressed).unwrap();
-            
-            // Write to temporary file
-            let temp_path = format!("{}.tmp", gfa_path);
-            {
-                let mut temp_file = File::create(&temp_path).unwrap();
-                temp_file.write_all(&decompressed).unwrap();
-            }
-            
-            // Parse the temporary file
-            let result = parser.parse_file(&temp_path).unwrap();
-            
-            // Clean up
-            std::fs::remove_file(&temp_path).unwrap();
-            
-            result
-        } else {
-            parser.parse_file(gfa_path).unwrap()
-        };
+        let gfa = read_gfa(gfa_path, &parser).unwrap();
         let block_graph = HashGraph::from_gfa(&gfa);
 
         // Record the id translation for this block
@@ -196,6 +196,12 @@ fn main() {
         }
     }
 
+    if args.debug {
+        eprintln!("Total nodes in combined graph: {}", combined_graph.node_count());
+        eprintln!("Total edges in combined graph: {}", combined_graph.edge_count());
+        eprintln!("Total path ranges collected: {}", path_key_ranges.len());
+    }
+
     // Sort ranges and create merged paths in the combined graph
     for (path_key, ranges) in path_key_ranges.iter_mut() {
         // Sort ranges by start position
@@ -215,10 +221,7 @@ fn main() {
         }
         
         if (has_overlaps || !all_contiguous) && args.debug {
-            eprintln!("\nPath key '{}' ranges analysis:", path_key);
-            if has_overlaps {
-                eprintln!("  Warning: Contains overlapping ranges!");
-            }
+            eprintln!("  Path key '{}' ranges analysis:", path_key);
             
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
@@ -231,13 +234,19 @@ fn main() {
                     current_gfa_ids.push(ranges[i].gfa_id);
                 } else {
                     // Print current merged range
-                    eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
+                    eprintln!("    Merged range: start={}, end={}, gfa_ids={:?}", 
                         current_start, current_end, current_gfa_ids);
                     
-                    // Calculate and print gap
-                    let gap = ranges[i].start - current_end;
-                    eprintln!("    Gap to next range: {} positions", gap);
-                    
+                    if !has_overlap(&ranges[i-1], &ranges[i]) {
+                        // Calculate and print gap
+                        let gap = ranges[i].start - current_end;
+                        eprintln!("      Gap to next range: {} positions", gap);
+                    } else {
+                        // Calculate and print overlap
+                        let overlap = current_end - ranges[i].start;
+                        eprintln!("      Overlap with next range: {} positions", overlap);
+                    }
+
                     // Start new merged range
                     current_start = ranges[i].start;
                     current_end = ranges[i].end;
@@ -246,7 +255,7 @@ fn main() {
             }
             
             // Print final merged range
-            eprintln!("  Merged range: start={}, end={}, gfa_ids={:?}", 
+            eprintln!("    Merged range: start={}, end={}, gfa_ids={:?}", 
                 current_start, current_end, current_gfa_ids);
         }
 
@@ -317,77 +326,17 @@ fn main() {
     }
 }
 
-pub struct PathRange {
-    pub path_name: String,
-    pub steps: Vec<LacePathStep>,
-}
-
-pub struct LacePathStep {
-    pub block_id: usize,
-    pub node_id: NodeId,
-}
-
-pub fn lace_smoothed_blocks(
-    smoothed_block_graphs: &[HashGraph],
-    path_ranges: &[PathRange],
-) -> HashGraph {
-    let mut smoothed_graph = HashGraph::new();
-    let mut block_id_to_smoothed_id: Vec<HashMap<NodeId, NodeId>> = vec![HashMap::new(); smoothed_block_graphs.len()];
-
-    // Copy nodes and edges from the smoothed blocks to the smoothed graph
-    for (block_id, smoothed_block) in smoothed_block_graphs.iter().enumerate() {
-        for handle in smoothed_block.handles() {
-            let sequence = smoothed_block.sequence(handle).collect::<Vec<_>>();
-            let new_node_id = smoothed_graph.create_handle::<usize>(&sequence.into_boxed_slice(), handle.id().into());
-            block_id_to_smoothed_id[block_id].insert(handle.id(), new_node_id.into());
-        }
-        for edge in smoothed_block.edges() {
-            smoothed_graph.create_edge(edge);
-        }
-    }
-
-    // Create paths in the smoothed graph based on the path ranges
-    for path_range in path_ranges {
-        let path_id = smoothed_graph.create_path(path_range.path_name.as_bytes(), false).unwrap();
-
-        for step in &path_range.steps {
-            let smoothed_node_id = block_id_to_smoothed_id[step.block_id][&step.node_id];
-            smoothed_graph.path_append_step(path_id, Handle::pack(smoothed_node_id, false));
-        }
-    }
-
-    // Connect the path steps in the smoothed graph
-    let mut edges = Vec::new();
-    for path_id in smoothed_graph.path_ids() {
-        let mut prev_step = None;
-        for step in smoothed_graph.get_path_ref(path_id).unwrap().nodes.iter() {
-            if let Some(prev) = prev_step {
-                edges.push(Edge(prev, *step));
-            }
-            prev_step = Some(*step);
-        }
-    }
-    // Create edges collected in previous step
-    for edge in edges {
-        smoothed_graph.create_edge(edge);
-    }
-        
-    smoothed_graph
-}
-
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
-    let parts: Vec<&str> = path_name.split('#').collect();
-    if parts.len() == 3 {
-        let key_parts = [parts[0], parts[1]];
-        let chr_range: Vec<&str> = parts[2].split(':').collect();
-        if chr_range.len() == 2 {
-            let name = chr_range[0];
-            let range: Vec<&str> = chr_range[1].split('-').collect();
-            if range.len() == 2 {
-                let start = range[0].parse().ok()?;
-                let end = range[1].parse().ok()?;
-                let key = format!("{}#{}", key_parts.join("#"), name);
-                return Some((key, start, end));
+    // Find the last ':' to split the range from the key
+    if let Some(last_colon) = path_name.rfind(':') {
+        let (key, range_str) = path_name.split_at(last_colon);
+        // Skip the ':' character
+        let range_str = &range_str[1..];
+        
+        // Find the '-' in the range portion
+        if let Some((start_str, end_str)) = range_str.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start_str.parse(), end_str.parse()) {
+                return Some((key.to_string(), start, end));
             }
         }
     }

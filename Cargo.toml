@@ -9,5 +9,5 @@ edition = "2021"
 bstr = "1.11.0"
 niffler = "2.6.0"
 clap = { version = "4.5.22", features = ["derive"] }
-handlegraph = { git = "https://github.com/chfi/rs-handlegraph", commit = "3ac575e4216ce16a16667503a8875e469a40a97a" }
+handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 gfa = "0.10.1"
