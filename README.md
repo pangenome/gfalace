@@ -47,7 +47,7 @@ Options:
 
 GFALace expects path names in the format:
 ```
-SAMPLE#HAP#CHROM:START-END
+NAME:START-END
 ```
 Example: `HG002#1#chr20:1000-2000`
 
@@ -55,6 +55,8 @@ The tool uses these coordinates to:
 1. Identify which sequences belong together
 2. Order the sequences correctly
 3. Detect and handle overlaps or gaps
+
+Note: `NAME` can contain ':' characters. When parsing coordinates, GFALace uses the last occurrence of ':' to separate the name from the coordinate range.
 
 ## Features
 
