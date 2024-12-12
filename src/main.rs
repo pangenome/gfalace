@@ -26,7 +26,7 @@ struct Args {
     debug: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RangeInfo {
     start: usize,
     end: usize,
@@ -226,6 +226,31 @@ fn main() {
     for (path_key, ranges) in path_key_ranges.iter_mut() {
         // Sort ranges by start position
         ranges.sort_by_key(|r| (r.start, r.end));
+
+        // Remove ranges that are contained within other ranges
+        if !ranges.is_empty() {
+            let mut filtered_ranges = Vec::new();
+            let mut prev_range = &ranges[0];
+            filtered_ranges.push(prev_range.clone());
+
+            for range in ranges.iter().skip(1) {
+                if range.start >= prev_range.start && range.end <= prev_range.end {
+                    // Current range is fully contained within prev_range, skip it
+                    if args.debug {
+                        eprintln!(
+                            "Range [start={}, end={}] is contained within [start={}, end={}] and will be removed.",
+                            range.start, range.end, prev_range.start, prev_range.end
+                        );
+                    }
+                    continue;
+                } else {
+                    filtered_ranges.push(range.clone());
+                    prev_range = range;
+                }
+            }
+
+            *ranges = filtered_ranges;
+        }
 
         // Process overlaps
         for i in 1..ranges.len() {
