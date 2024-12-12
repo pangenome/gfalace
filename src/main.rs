@@ -346,64 +346,76 @@ fn main() {
                             let left_seq = &node_seq[0..overlap_start_offset];
                             let right_seq = &node_seq[overlap_end_offset..];
 
-                            let left_id = NodeId::from(next_node_id_value);
-                            next_node_id_value += 1;
-                            let right_id = NodeId::from(next_node_id_value);
-                            next_node_id_value += 1;
+                            // Only create left node if sequence is not empty
+                            let mut left_handle = None;
+                            if !left_seq.is_empty() {
+                                let left_id = NodeId::from(next_node_id_value);
+                                next_node_id_value += 1;
+                                let left_node = combined_graph.create_handle(left_seq, left_id);
+                                left_handle = Some(if step_handle.is_reverse() {
+                                    left_node.flip()
+                                } else {
+                                    left_node
+                                });
+                                new_steps.push(left_handle.unwrap());
+                                new_step_positions.push((step_start, overlap_start));
+                                new_step_lengths.push(left_seq.len());
+                            }
 
-                            let left_node = combined_graph.create_handle(left_seq, left_id);
-                            let right_node = combined_graph.create_handle(right_seq, right_id);
+                            // Only create right node if sequence is not empty
+                            let mut right_handle = None;
+                            if !right_seq.is_empty() {
+                                let right_id = NodeId::from(next_node_id_value);
+                                next_node_id_value += 1;
+                                let right_node = combined_graph.create_handle(right_seq, right_id);
+                                right_handle = Some(if step_handle.is_reverse() {
+                                    right_node.flip()
+                                } else {
+                                    right_node
+                                });
+                                new_steps.push(right_handle.unwrap());
+                                new_step_positions.push((overlap_end, step_end));
+                                new_step_lengths.push(right_seq.len());
+                            }
 
-                            let left_handle = if step_handle.is_reverse() {
-                                left_node.flip()
-                            } else {
-                                left_node
-                            };
-                            let right_handle = if step_handle.is_reverse() {
-                                right_node.flip()
-                            } else {
-                                right_node
-                            };
-
-                            new_steps.push(left_handle);
-                            new_step_positions.push((step_start, overlap_start));
-                            new_step_lengths.push(left_seq.len());
-
-                            new_steps.push(right_handle);
-                            new_step_positions.push((overlap_end, step_end));
-                            new_step_lengths.push(right_seq.len());
-
-                            combined_graph.create_edge(Edge(left_handle, right_handle));
+                            // Create edge only if both nodes exist
+                            if let (Some(left), Some(right)) = (left_handle, right_handle) {
+                                combined_graph.create_edge(Edge(left, right));
+                            }
                         } else if step_start < overlap_start {
                             // Keep left part
                             let new_seq = &node_seq[0..overlap_start_offset];
-                            let node_id = NodeId::from(next_node_id_value);
-                            next_node_id_value += 1;
-                            let new_node = combined_graph.create_handle(new_seq, node_id);
-                            let new_handle = if step_handle.is_reverse() {
-                                new_node.flip()
-                            } else {
-                                new_node
-                            };
+                            if !new_seq.is_empty() {
+                                let node_id = NodeId::from(next_node_id_value);
+                                next_node_id_value += 1;
+                                let new_node = combined_graph.create_handle(new_seq, node_id);
+                                let new_handle = if step_handle.is_reverse() {
+                                    new_node.flip()
+                                } else {
+                                    new_node
+                                };
 
-                            new_steps.push(new_handle);
-                            new_step_positions.push((step_start, overlap_start));
-                            new_step_lengths.push(new_seq.len());
+                                new_steps.push(new_handle);
+                                new_step_positions.push((step_start, overlap_start));
+                                new_step_lengths.push(new_seq.len());
+                            }
                         } else if step_end > overlap_end {
                             // Keep right part
                             let new_seq = &node_seq[overlap_end_offset..];
-                            let node_id = NodeId::from(next_node_id_value);
-                            next_node_id_value += 1;
-                            let new_node = combined_graph.create_handle(new_seq, node_id);
-                            let new_handle = if step_handle.is_reverse() {
-                                new_node.flip()
-                            } else {
-                                new_node
-                            };
+                            if !new_seq.is_empty() {
+                                let node_id = NodeId::from(next_node_id_value);
+                                next_node_id_value += 1;
+                                let new_node = combined_graph.create_handle(new_seq, node_id);
+                                let new_handle = if step_handle.is_reverse() {
+                                    new_node.flip()
+                                } else {
+                                    new_node
+                                };
 
-                            new_steps.push(new_handle);
-                            new_step_positions.push((overlap_end, step_end));
-                            new_step_lengths.push(new_seq.len());
+                                new_steps.push(new_handle);
+                                new_step_positions.push((overlap_end, step_end));
+                                new_step_lengths.push(new_seq.len());
+                            }
                         }
                     } else {
                         // Keep steps that are not to be removed or split
