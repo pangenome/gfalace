@@ -227,6 +227,13 @@ fn main() {
         // Sort ranges by start position
         ranges.sort_by_key(|r| (r.start, r.end));
 
+        if args.debug {
+            eprintln!("Processing path key '{}'", path_key);
+            for range in ranges.iter() {
+                eprintln!("  Range: start={}, end={}, gfa_id={}", range.start, range.end, range.gfa_id);
+            }
+        }
+
         // Remove ranges that are contained within other ranges
         if !ranges.is_empty() {
             let mut filtered_ranges = Vec::new();
@@ -238,7 +245,7 @@ fn main() {
                     // Current range is fully contained within prev_range, skip it
                     if args.debug {
                         eprintln!(
-                            "Range [start={}, end={}] is contained within [start={}, end={}] and will be removed.",
+                            "Redundant range detected: Range [start={}, end={}] is contained within [start={}, end={}] and will be removed.",
                             range.start, range.end, prev_range.start, prev_range.end
                         );
                     }
@@ -267,8 +274,8 @@ fn main() {
                     let overlap_amount = overlap_end - overlap_start;
 
                     eprintln!(
-                        "Overlap detected in path '{}': Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
-                        path_key, r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_amount
+                        "Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
+                        r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_amount
                     );
                 }
 
