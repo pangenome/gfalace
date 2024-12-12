@@ -239,7 +239,7 @@ fn main() {
             let mut filtered_ranges = Vec::new();
             let mut prev_range = ranges[0].clone();
 
-            for range in ranges.iter() {
+            for range in ranges.iter().skip(1)  {
                 if range.start >= prev_range.start && range.end <= prev_range.end {
                     // Current range is fully contained within prev_range, skip it
                     if args.debug {
