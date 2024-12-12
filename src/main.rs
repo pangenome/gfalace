@@ -234,6 +234,17 @@ fn main() {
             let r2 = &mut right[0];
 
             if has_overlap(r1, r2) {
+                if args.debug {
+                    let overlap_start = std::cmp::max(r1.start, r2.start);
+                    let overlap_end = std::cmp::min(r1.end, r2.end);
+                    let overlap_amount = overlap_end - overlap_start;
+
+                    eprintln!(
+                        "Overlap detected in path '{}': Range1 [start={}, end={}], Range2 [start={}, end={}], overlap size={}",
+                        path_key, r1.start, r1.end, r2.start, r2.start, overlap_amount
+                    );
+                }
+
                 // Calculate the overlap region
                 let overlap_start = r2.start;
                 let overlap_end = r1.end;
