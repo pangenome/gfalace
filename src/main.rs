@@ -215,8 +215,8 @@ fn main() {
     }
 
     if args.debug {
-        eprintln!("Total nodes in combined graph: {}", combined_graph.node_count());
-        eprintln!("Total edges in combined graph: {}", combined_graph.edge_count());
+        eprintln!("Total nodes in the combined graph: {}", combined_graph.node_count());
+        eprintln!("Total edges in the combined graph: {}", combined_graph.edge_count());
         eprintln!("Total path ranges collected: {}", path_key_ranges.len());
     }
 
