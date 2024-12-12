@@ -328,8 +328,18 @@ fn main() {
                         let node_seq = combined_graph.sequence(step_handle).collect::<Vec<_>>();
                         let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
                         let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
-                        let overlap_start_offset = overlap_within_step_start - step_start;
-                        let overlap_end_offset = overlap_within_step_end - step_start;
+                        
+                        let (overlap_start_offset, overlap_end_offset) = if !step_handle.is_reverse() {
+                            // Forward handle
+                            let start_offset = overlap_within_step_start - step_start;
+                            let end_offset = overlap_within_step_end - step_start;
+                            (start_offset, end_offset)
+                        } else {
+                            // Reverse handle
+                            let start_offset = step_end - overlap_within_step_end;
+                            let end_offset = step_end - overlap_within_step_start;
+                            (start_offset, end_offset)
+                        };
 
                         if step_start < overlap_start && step_end > overlap_end {
                             // Split into three parts
