@@ -329,15 +329,17 @@ fn main() {
                         let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
                         let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
                         
+                        // Calculate offsets relative to the node sequence
+                        let node_len = node_seq.len();
                         let (overlap_start_offset, overlap_end_offset) = if !step_handle.is_reverse() {
-                            // Forward handle
-                            let start_offset = overlap_within_step_start - step_start;
-                            let end_offset = overlap_within_step_end - step_start;
+                            // Forward handle - offsets from start of sequence
+                            let start_offset = (overlap_within_step_start - step_start).min(node_len);
+                            let end_offset = (overlap_within_step_end - step_start).min(node_len);
                             (start_offset, end_offset)
                         } else {
-                            // Reverse handle
-                            let start_offset = step_end - overlap_within_step_end;
-                            let end_offset = step_end - overlap_within_step_start;
+                            // Reverse handle - offsets from end of sequence
+                            let start_offset = (step_end - overlap_within_step_end).min(node_len);
+                            let end_offset = (step_end - overlap_within_step_start).min(node_len);
                             (start_offset, end_offset)
                         };
 
@@ -346,9 +348,9 @@ fn main() {
                             let left_seq = &node_seq[0..overlap_start_offset];
                             let right_seq = &node_seq[overlap_end_offset..];
 
-                            // Only create left node if sequence is not empty
+                            // Only create left node if sequence is not empty and within bounds
                             let mut left_handle = None;
-                            if !left_seq.is_empty() {
+                            if !left_seq.is_empty() && overlap_start_offset > 0 {
                                 let left_id = NodeId::from(next_node_id_value);
                                 next_node_id_value += 1;
                                 let left_node = combined_graph.create_handle(left_seq, left_id);
@@ -358,13 +360,15 @@ fn main() {
                                     left_node
                                 });
                                 new_steps.push(left_handle.unwrap());
-                                new_step_positions.push((step_start, overlap_start));
+                                let left_start = step_start;
+                                let left_end = left_start + left_seq.len();
+                                new_step_positions.push((left_start, left_end));
                                 new_step_lengths.push(left_seq.len());
                             }
 
-                            // Only create right node if sequence is not empty
+                            // Only create right node if sequence is not empty and within bounds
                             let mut right_handle = None;
-                            if !right_seq.is_empty() {
+                            if !right_seq.is_empty() && overlap_end_offset < node_seq.len() {
                                 let right_id = NodeId::from(next_node_id_value);
                                 next_node_id_value += 1;
                                 let right_node = combined_graph.create_handle(right_seq, right_id);
@@ -374,7 +378,9 @@ fn main() {
                                     right_node
                                 });
                                 new_steps.push(right_handle.unwrap());
-                                new_step_positions.push((overlap_end, step_end));
+                                let right_start = overlap_end;
+                                let right_end = right_start + right_seq.len();
+                                new_step_positions.push((right_start, right_end));
                                 new_step_lengths.push(right_seq.len());
                             }
 
