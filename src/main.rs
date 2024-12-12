@@ -241,7 +241,7 @@ fn main() {
 
                     eprintln!(
                         "Overlap detected in path '{}': Range1 [start={}, end={}], Range2 [start={}, end={}], overlap size={}",
-                        path_key, r1.start, r1.end, r2.start, r2.start, overlap_amount
+                        path_key, r1.start, r1.end, r2.start, r2.end, overlap_amount
                     );
                 }
 
