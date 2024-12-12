@@ -31,7 +31,9 @@ struct RangeInfo {
     start: usize,
     end: usize,
     gfa_id: usize,
-    steps: Vec<Handle>,  // Store the path steps for this range
+    steps: Vec<Handle>,                    // Path steps for this range
+    step_positions: Vec<(usize, usize)>,   // Start and end positions of each step
+    step_lengths: Vec<usize>,              // Lengths of each step
 }
 
 // Helper function to check if two ranges are contiguous
@@ -176,10 +178,24 @@ fn main() {
                 if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
                     // Get the path steps and translate their IDs
                     let mut translated_steps = Vec::new();
+                    let mut step_positions = Vec::new();
+                    let mut step_lengths = Vec::new();
+                    let mut cumulative_pos = start;
+
                     if let Some(path_ref) = block_graph.get_path_ref(path_id) {
                         for step in path_ref.nodes.iter() {
                             let translated_id = id_translation + step.id().into();
-                            translated_steps.push(Handle::pack(translated_id, step.is_reverse()));
+                            let translated_step = Handle::pack(translated_id, step.is_reverse());
+                            translated_steps.push(translated_step);
+
+                            // Get the sequence length of the node
+                            let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
+                            let node_length = node_seq.len();
+                            step_lengths.push(node_length);
+
+                            // Record the end position of this step
+                            step_positions.push((cumulative_pos, cumulative_pos + node_length));
+                            cumulative_pos = cumulative_pos + node_length;
                         }
                     }
                     
@@ -190,6 +206,8 @@ fn main() {
                             end, 
                             gfa_id,
                             steps: translated_steps,
+                            step_positions,
+                            step_lengths,
                         });
                 }
             }
@@ -202,11 +220,156 @@ fn main() {
         eprintln!("Total path ranges collected: {}", path_key_ranges.len());
     }
 
+    let mut next_node_id_value = u64::from(combined_graph.max_node_id()) + 1;
+
     // Sort ranges and create merged paths in the combined graph
     for (path_key, ranges) in path_key_ranges.iter_mut() {
         // Sort ranges by start position
         ranges.sort_by_key(|r| (r.start, r.end));
-        
+
+        // Process overlaps
+        for i in 1..ranges.len() {
+            let (left, right) = ranges.split_at_mut(i);
+            let r1 = &mut left[left.len()-1];
+            let r2 = &mut right[0];
+
+            if has_overlap(r1, r2) {
+                // Calculate the overlap region
+                let overlap_start = r2.start;
+                let overlap_end = r1.end;
+
+                // Adjust r2 to remove the overlap
+                let mut steps_to_remove = Vec::new();
+                let mut steps_to_split = Vec::new();
+
+                for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
+                    if step_end <= overlap_start {
+                        //println!("\tStep {} before overlap", idx);
+                        continue;
+                    } else if step_start >= overlap_end {
+                        //println!("\tStep {} after overlap", idx);
+                        break;
+                    } else if step_start >= overlap_start && step_end <= overlap_end {
+                        //println!("\tStep {} within overlap", idx);
+                        steps_to_remove.push(idx);
+                    } else {
+                        //println!("\tStep {} partially overlaps", idx);
+                        steps_to_split.push(idx);
+                    }
+                }
+
+                // Initialize new vectors to store updated steps
+                let mut new_steps = Vec::new();
+                let mut new_step_positions = Vec::new();
+                let mut new_step_lengths = Vec::new();
+
+                // Iterate over the original steps
+                for idx in 0..r2.steps.len() {
+                    let step_handle = r2.steps[idx];
+                    let (step_start, step_end) = r2.step_positions[idx];
+
+                    if steps_to_remove.contains(&idx) {
+                        // Skip steps to remove
+                        continue;
+                    } else if steps_to_split.contains(&idx) {
+                        // Split nodes for steps that partially overlap
+                        let node_seq = combined_graph.sequence(step_handle).collect::<Vec<_>>();
+                        let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
+                        let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
+                        let overlap_start_offset = overlap_within_step_start - step_start;
+                        let overlap_end_offset = overlap_within_step_end - step_start;
+
+                        if step_start < overlap_start && step_end > overlap_end {
+                            // Split into three parts
+                            let left_seq = &node_seq[0..overlap_start_offset];
+                            let right_seq = &node_seq[overlap_end_offset..];
+
+                            let left_id = NodeId::from(next_node_id_value);
+                            next_node_id_value += 1;
+                            let right_id = NodeId::from(next_node_id_value);
+                            next_node_id_value += 1;
+
+                            let left_node = combined_graph.create_handle(left_seq, left_id);
+                            let right_node = combined_graph.create_handle(right_seq, right_id);
+
+                            let left_handle = if step_handle.is_reverse() {
+                                left_node.flip()
+                            } else {
+                                left_node
+                            };
+                            let right_handle = if step_handle.is_reverse() {
+                                right_node.flip()
+                            } else {
+                                right_node
+                            };
+
+                            new_steps.push(left_handle);
+                            new_step_positions.push((step_start, overlap_start));
+                            new_step_lengths.push(left_seq.len());
+
+                            new_steps.push(right_handle);
+                            new_step_positions.push((overlap_end, step_end));
+                            new_step_lengths.push(right_seq.len());
+
+                            combined_graph.create_edge(Edge(left_handle, right_handle));
+                        } else if step_start < overlap_start {
+                            // Keep left part
+                            let new_seq = &node_seq[0..overlap_start_offset];
+                            let node_id = NodeId::from(next_node_id_value);
+                            next_node_id_value += 1;
+                            let new_node = combined_graph.create_handle(new_seq, node_id);
+                            let new_handle = if step_handle.is_reverse() {
+                                new_node.flip()
+                            } else {
+                                new_node
+                            };
+
+                            new_steps.push(new_handle);
+                            new_step_positions.push((step_start, overlap_start));
+                            new_step_lengths.push(new_seq.len());
+                        } else if step_end > overlap_end {
+                            // Keep right part
+                            let new_seq = &node_seq[overlap_end_offset..];
+                            let node_id = NodeId::from(next_node_id_value);
+                            next_node_id_value += 1;
+                            let new_node = combined_graph.create_handle(new_seq, node_id);
+                            let new_handle = if step_handle.is_reverse() {
+                                new_node.flip()
+                            } else {
+                                new_node
+                            };
+
+                            new_steps.push(new_handle);
+                            new_step_positions.push((overlap_end, step_end));
+                            new_step_lengths.push(new_seq.len());
+                        }
+                    } else {
+                        // Keep steps that are not to be removed or split
+                        new_steps.push(step_handle);
+                        new_step_positions.push((step_start, step_end));
+                        new_step_lengths.push(r2.step_lengths[idx]);
+                    }
+                }
+
+                // Update r2 with the new steps
+                r2.steps = new_steps;
+                r2.step_positions = new_step_positions;
+                r2.step_lengths = new_step_lengths;
+
+                // Update edges for the modified steps
+                for idx in 0..r2.steps.len() {
+                    if idx > 0 {
+                        let prev_step = r2.steps[idx - 1];
+                        if !combined_graph.has_edge(prev_step, r2.steps[idx]) {
+                            combined_graph.create_edge(Edge(prev_step, r2.steps[idx]));
+                        }
+                    }
+                }
+
+                r2.start = overlap_end;
+            }
+        }
+
         // Check for overlaps and contiguity
         let mut has_overlaps = false;
         let mut all_contiguous = true;
