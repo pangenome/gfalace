@@ -234,25 +234,22 @@ fn main() {
             let r2 = &mut right[0];
 
             if has_overlap(r1, r2) {
-                if args.debug {
-                    let overlap_start = std::cmp::max(r1.start, r2.start);
-                    let overlap_end = std::cmp::min(r1.end, r2.end);
-                    let overlap_amount = overlap_end - overlap_start;
-
-                    eprintln!(
-                        "Overlap detected in path '{}': Range1 [start={}, end={}], Range2 [start={}, end={}], overlap size={}",
-                        path_key, r1.start, r1.end, r2.start, r2.end, overlap_amount
-                    );
-                }
-
                 // Calculate the overlap region
                 let overlap_start = r2.start;
                 let overlap_end = r1.end;
 
+                if args.debug {
+                    let overlap_amount = overlap_end - overlap_start;
+
+                    eprintln!(
+                        "Overlap detected in path '{}': Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
+                        path_key, r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_amount
+                    );
+                }
+
                 // Adjust r2 to remove the overlap
                 let mut steps_to_remove = Vec::new();
                 let mut steps_to_split = Vec::new();
-
                 for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
                     if step_end <= overlap_start {
                         //println!("\tStep {} before overlap", idx);
