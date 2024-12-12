@@ -237,10 +237,9 @@ fn main() {
         // Remove ranges that are contained within other ranges
         if !ranges.is_empty() {
             let mut filtered_ranges = Vec::new();
-            let mut prev_range = &ranges[0];
-            filtered_ranges.push(prev_range.clone());
+            let mut prev_range = ranges[0].clone();
 
-            for range in ranges.iter().skip(1) {
+            for range in ranges.iter() {
                 if range.start >= prev_range.start && range.end <= prev_range.end {
                     // Current range is fully contained within prev_range, skip it
                     if args.debug {
@@ -250,11 +249,24 @@ fn main() {
                         );
                     }
                     continue;
+                } else if prev_range.start >= range.start && prev_range.end <= range.end {
+                    // Prev_range is fully contained within current range, replace prev_range with current range
+                    if args.debug {
+                        eprintln!(
+                            "Redundant range detected: Previous range [start={}, end={}] is contained within [start={}, end={}] and will be replaced.",
+                            prev_range.start, prev_range.end, range.start, range.end
+                        );
+                    }
+                    prev_range = range.clone();
                 } else {
-                    filtered_ranges.push(range.clone());
-                    prev_range = range;
+                    // No containment, add the previous range and update prev_range
+                    filtered_ranges.push(prev_range.clone());
+                    prev_range = range.clone();
                 }
             }
+
+            // Don't forget to add the last range
+            filtered_ranges.push(prev_range);
 
             *ranges = filtered_ranges;
         }
