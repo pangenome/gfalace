@@ -278,9 +278,9 @@ fn main() {
             let r2 = &mut right[0];
 
             if has_overlap(r1, r2) {
-                // Calculate the overlap region
-                let overlap_start = r2.start;
-                let overlap_end = r1.end;
+                // Calculate the overlap region - use max/min to get precise overlap bounds
+                let overlap_start = std::cmp::max(r1.start, r2.start);
+                let overlap_end = std::cmp::min(r1.end, r2.end);
 
                 if args.debug {
                     let overlap_amount = overlap_end - overlap_start;
