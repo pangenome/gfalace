@@ -446,7 +446,15 @@ fn main() {
                     }
                 }
 
-                r2.start = overlap_end;
+                // Update r2.start and r2.end based on the new step positions
+                if !r2.step_positions.is_empty() {
+                    r2.start = r2.step_positions.first().unwrap().0;
+                    r2.end = r2.step_positions.last().unwrap().1;
+                } else {
+                    // If no steps remain, set start and end to overlap_end to effectively remove this range
+                    r2.start = overlap_end;
+                    r2.end = overlap_end;
+                }
             }
         }
 
