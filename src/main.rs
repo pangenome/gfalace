@@ -212,7 +212,7 @@ fn main() {
                             step_lengths,
                         });
                     } else if args.debug {
-                        eprintln!("  Warning: Path '{}' has no steps", path_name);
+                        eprintln!("  Warning: path '{}' has no steps", path_name);
                     }
                 }
             }
@@ -275,7 +275,6 @@ fn main() {
                 }
             }
         }
-
         // Truncate the ranges vector to remove any skipped elements
         ranges.truncate(write_idx + 1);
 
@@ -315,18 +314,31 @@ fn main() {
                 let mut steps_to_split = Vec::new();
                 for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
                     if step_end <= overlap_start {
-                        //println!("\tStep {} before overlap", idx);
+                        if args.debug && r2.start == 154089 {
+                            eprintln!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
+                        }
                         continue;
                     } else if step_start >= overlap_end {
-                        //println!("\tStep {} after overlap", idx);
+                        if args.debug && r2.start == 154089 {
+                            eprintln!("    Step {} [start={}, end={}, len={}] after overlap", idx, step_start, step_end, step_end - step_start);
+                        }
                         break;
                     } else if step_start >= overlap_start && step_end <= overlap_end {
-                        //println!("\tStep {} within overlap", idx);
+                        if args.debug && r2.start == 154089 {
+                            eprintln!("    Step {} [start={}, end={}, len={}] fully overlaps", idx, step_start, step_end, step_end - step_start);
+                        }
                         steps_to_remove.push(idx);
                     } else {
-                        //println!("\tStep {} partially overlaps", idx);
+                        if args.debug && r2.start == 154089 {
+                            eprintln!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
+                        }
                         steps_to_split.push(idx);
                     }
+                }
+
+                if args.debug && r2.start == 154089 {
+                    eprintln!("    {} steps to remove", steps_to_remove.len());
+                    eprintln!("    Steps to split: {:?}", steps_to_split);   
                 }
 
                 // Initialize new vectors to store updated steps
