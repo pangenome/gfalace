@@ -132,6 +132,7 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<(
     
     Ok(())
 }
+
 fn main() {
     let args = Args::parse();
 
