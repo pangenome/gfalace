@@ -311,7 +311,7 @@ fn main() {
 
                 // Adjust r2 to remove the overlap
                 let mut steps_to_remove = Vec::new();
-                let mut steps_to_split = Vec::new();
+                let mut step_to_split: Option<usize> = None;
                 for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
                     if step_end <= overlap_start {
                         if args.debug && r2.start == 154089 {
@@ -332,13 +332,16 @@ fn main() {
                         if args.debug && r2.start == 154089 {
                             eprintln!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
                         }
-                        steps_to_split.push(idx);
+                        if step_to_split.is_some() {
+                            panic!("Error: More than one step is partially overlapping, which is not allowed.");
+                        }
+                        step_to_split = Some(idx);
                     }
                 }
 
                 if args.debug && r2.start == 154089 {
                     eprintln!("    {} steps to remove", steps_to_remove.len());
-                    eprintln!("    Steps to split: {:?}", steps_to_split);   
+                    eprintln!("    Step to split: {:?}", step_to_split);   
                 }
 
                 // Initialize new vectors to store updated steps
@@ -354,8 +357,8 @@ fn main() {
                     if steps_to_remove.contains(&idx) {
                         // Skip steps to remove
                         continue;
-                    } else if steps_to_split.contains(&idx) {
-                        // Split nodes for steps that partially overlap
+                    } else if step_to_split == Some(idx) {
+                        // Split node for the single partially overlapping step
                         let node_seq = combined_graph.sequence(step_handle).collect::<Vec<_>>();
                         let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
                         let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
@@ -374,52 +377,7 @@ fn main() {
                             (start_offset, end_offset)
                         };
 
-                        if step_start < overlap_start && step_end > overlap_end {
-                            // Split into three parts
-                            let left_seq = &node_seq[0..overlap_start_offset];
-                            let right_seq = &node_seq[overlap_end_offset..];
-
-                            // Only create left node if sequence is not empty and within bounds
-                            let mut left_handle = None;
-                            if !left_seq.is_empty() && overlap_start_offset > 0 {
-                                let left_id = NodeId::from(next_node_id_value);
-                                next_node_id_value += 1;
-                                let left_node = combined_graph.create_handle(left_seq, left_id);
-                                left_handle = Some(if step_handle.is_reverse() {
-                                    left_node.flip()
-                                } else {
-                                    left_node
-                                });
-                                new_steps.push(left_handle.unwrap());
-                                let left_start = step_start;
-                                let left_end = left_start + left_seq.len();
-                                new_step_positions.push((left_start, left_end));
-                                new_step_lengths.push(left_seq.len());
-                            }
-
-                            // Only create right node if sequence is not empty and within bounds
-                            let mut right_handle = None;
-                            if !right_seq.is_empty() && overlap_end_offset < node_seq.len() {
-                                let right_id = NodeId::from(next_node_id_value);
-                                next_node_id_value += 1;
-                                let right_node = combined_graph.create_handle(right_seq, right_id);
-                                right_handle = Some(if step_handle.is_reverse() {
-                                    right_node.flip()
-                                } else {
-                                    right_node
-                                });
-                                new_steps.push(right_handle.unwrap());
-                                let right_start = overlap_end;
-                                let right_end = right_start + right_seq.len();
-                                new_step_positions.push((right_start, right_end));
-                                new_step_lengths.push(right_seq.len());
-                            }
-
-                            // Create edge only if both nodes exist
-                            if let (Some(left), Some(right)) = (left_handle, right_handle) {
-                                combined_graph.create_edge(Edge(left, right));
-                            }
-                        } else if step_start < overlap_start {
+                        if step_start < overlap_start {
                             // Keep left part
                             let new_seq = &node_seq[0..overlap_start_offset];
                             if !new_seq.is_empty() {
