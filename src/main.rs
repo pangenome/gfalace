@@ -198,8 +198,9 @@ fn main() {
                             cumulative_pos = cumulative_pos + node_length;
                         }
                     }
-                    
-                    path_key_ranges.entry(sample_hap_name)
+
+                    if !translated_steps.is_empty() {
+                        path_key_ranges.entry(sample_hap_name)
                         .or_default()
                         .push(RangeInfo { 
                             start, 
@@ -209,15 +210,17 @@ fn main() {
                             step_positions,
                             step_lengths,
                         });
+                    } else if args.debug {
+                        eprintln!("  Warning: Path '{}' has no steps", path_name);
+                    }
                 }
             }
         }
     }
 
     if args.debug {
-        eprintln!("Total nodes in the combined graph: {}", combined_graph.node_count());
-        eprintln!("Total edges in the combined graph: {}", combined_graph.edge_count());
-        eprintln!("Total path ranges collected: {}", path_key_ranges.len());
+        eprintln!("Collected {} nodes, {} edges, {} paths, and {} path ranges from all GFA files",
+            combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len(), path_key_ranges.iter().map(|(_, ranges)| ranges.len()).sum::<usize>());
     }
 
     let mut next_node_id_value = u64::from(combined_graph.max_node_id()) + 1;
@@ -230,45 +233,60 @@ fn main() {
         if args.debug {
             eprintln!("Processing path key '{}'", path_key);
             for range in ranges.iter() {
-                eprintln!("  Range: start={}, end={}, gfa_id={}", range.start, range.end, range.gfa_id);
+                eprintln!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
             }
+
+            eprintln!("Removing redundant ranges");
         }
 
         // Remove ranges that are contained within other ranges
-        if !ranges.is_empty() {
-            let mut filtered_ranges = Vec::new();
-            let mut prev_range = ranges[0].clone();
+        let mut write_idx = 0;
+        for read_idx in 1..ranges.len() {
+            let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
+            let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
 
-            for range in ranges.iter().skip(1)  {
-                if range.start >= prev_range.start && range.end <= prev_range.end {
-                    // Current range is fully contained within prev_range, skip it
-                    if args.debug {
-                        eprintln!(
-                            "Redundant range detected: Range [start={}, end={}] is contained within [start={}, end={}] and will be removed.",
-                            range.start, range.end, prev_range.start, prev_range.end
-                        );
-                    }
-                    continue;
-                } else if prev_range.start >= range.start && prev_range.end <= range.end {
-                    // Prev_range is fully contained within current range, replace prev_range with current range
-                    if args.debug {
-                        eprintln!(
-                            "Redundant range detected: Previous range [start={}, end={}] is contained within [start={}, end={}] and will be replaced.",
-                            prev_range.start, prev_range.end, range.start, range.end
-                        );
-                    }
-                    prev_range = range.clone();
-                } else {
-                    // No containment, add the previous range and update prev_range
-                    filtered_ranges.push(prev_range.clone());
-                    prev_range = range.clone();
+            if curr_start == prev_start && curr_end == prev_end {
+                // Current range is a duplicate of the previous range, skip it
+                if args.debug {
+                    eprintln!(
+                        "  Duplicate range detected: Range [start={}, end={}] is identical to previous range and will be removed.",
+                        curr_start, curr_end
+                    );
+                }
+                continue;
+            } else if curr_start >= prev_start && curr_end <= prev_end {
+                // Current range is contained within previous range, skip it
+                continue;
+            } else if prev_start >= curr_start && prev_end <= curr_end {
+                // Previous range is contained within current range
+                if args.debug {
+                    eprintln!(
+                        "  Redundant range detected: Range [start={}, end={}, len={}] is contained within [start={}, end={} | len={}] and will be removed.",
+                        prev_start, prev_end, prev_end - prev_start, curr_start, curr_end, curr_end - curr_start
+                    );
+                }
+                ranges.swap(write_idx, read_idx);
+            } else {
+                // No containment, advance write_idx and copy current range
+                write_idx += 1;
+                if write_idx != read_idx {
+                    ranges.swap(write_idx, read_idx);
                 }
             }
+        }
 
-            // Don't forget to add the last range
-            filtered_ranges.push(prev_range);
+        // Truncate the ranges vector to remove any skipped elements
+        ranges.truncate(write_idx + 1);
 
-            *ranges = filtered_ranges;
+        if args.debug {
+            eprintln!("Path key '{}' without redundancy", path_key);
+            for range in ranges.iter() {
+                eprintln!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            }
+        }
+
+        if args.debug {
+            eprintln!("Trimming overlapping ranges");
         }
 
         // Process overlaps
@@ -286,7 +304,7 @@ fn main() {
                     let overlap_amount = overlap_end - overlap_start;
 
                     eprintln!(
-                        "Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
+                        "  Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
                         r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_amount
                     );
                 }
@@ -455,25 +473,38 @@ fn main() {
                     r2.start = overlap_end;
                     r2.end = overlap_end;
                 }
+
+
+                if args.debug {
+                    eprintln!("    Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
+                }
+            }
+        }
+
+        if args.debug {
+            eprintln!("Path key '{}' without overlaps", path_key);
+            for range in ranges.iter() {
+                eprintln!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
             }
         }
 
         // Check for overlaps and contiguity
-        let mut has_overlaps = false;
         let mut all_contiguous = true;
         
         for window in ranges.windows(2) {
             if has_overlap(&window[0], &window[1]) {
-                has_overlaps = true;
+                if args.debug {
+                    eprintln!("Unresolved overlaps detected between ranges: [start={}, end={}] and [start={}, end={}]", 
+                    window[0].start, window[0].end, window[1].start, window[1].end);
+                }
+                panic!("Unresolved overlaps detected in path key '{}'", path_key);
             }
             if !is_contiguous(&window[0], &window[1]) {
                 all_contiguous = false;
             }
         }
-        
-        if (has_overlaps || !all_contiguous) && args.debug {
-            eprintln!("  Path key '{}' ranges analysis:", path_key);
-            
+                
+        if !all_contiguous && args.debug {
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
             let mut current_gfa_ids = vec![ranges[0].gfa_id];
@@ -510,7 +541,7 @@ fn main() {
                 current_start, current_end, current_gfa_ids);
         }
 
-        if all_contiguous && !has_overlaps {
+        if all_contiguous {
             // Create a single path with the original key
             let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
             let mut prev_step = None;
@@ -546,6 +577,7 @@ fn main() {
                 
                 // Create path name with range information
                 let path_name = format!("{}:{}-{}", path_key, start_range.start, end_range.end);
+                println!("Creating path: {} with {} steps", path_name, steps.len());
                 let path_id = combined_graph.create_path(path_name.as_bytes(), false).unwrap();
                 
                 // Add steps to the path
