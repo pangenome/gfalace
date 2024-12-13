@@ -212,7 +212,7 @@ fn main() {
                             step_lengths,
                         });
                     } else if args.debug {
-                        eprintln!("  Warning: path '{}' has no steps", path_name);
+                        eprintln!("  Warning: Path '{}' has no steps", path_name);
                     }
                 }
             }
@@ -314,24 +314,24 @@ fn main() {
                 let mut step_to_split: Option<usize> = None;
                 for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
                     if step_end <= overlap_start {
-                        if args.debug && r2.start == 154089 {
-                            eprintln!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
-                        }
+                        // if args.debug {
+                        //     eprintln!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
+                        // }
                         continue;
                     } else if step_start >= overlap_end {
-                        if args.debug && r2.start == 154089 {
-                            eprintln!("    Step {} [start={}, end={}, len={}] after overlap", idx, step_start, step_end, step_end - step_start);
-                        }
+                        // if args.debug {
+                        //     eprintln!("    Step {} [start={}, end={}, len={}] after overlap", idx, step_start, step_end, step_end - step_start);
+                        // }
                         break;
                     } else if step_start >= overlap_start && step_end <= overlap_end {
-                        if args.debug && r2.start == 154089 {
-                            eprintln!("    Step {} [start={}, end={}, len={}] fully overlaps", idx, step_start, step_end, step_end - step_start);
-                        }
+                        // if args.debug {
+                        //     eprintln!("    Step {} [start={}, end={}, len={}] fully overlaps", idx, step_start, step_end, step_end - step_start);
+                        // }
                         steps_to_remove.push(idx);
                     } else {
-                        if args.debug && r2.start == 154089 {
-                            eprintln!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
-                        }
+                        // if args.debug {
+                        //     eprintln!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
+                        // }
                         if step_to_split.is_some() {
                             panic!("Error: More than one step is partially overlapping, which is not allowed.");
                         }
@@ -340,7 +340,7 @@ fn main() {
                 }
 
                 if args.debug && r2.start == 154089 {
-                    eprintln!("    {} steps to remove", steps_to_remove.len());
+                    eprintln!("    Total steps to remove: {}", steps_to_remove.len());
                     eprintln!("    Step to split: {:?}", step_to_split);   
                 }
 
@@ -365,52 +365,48 @@ fn main() {
                         
                         // Calculate offsets relative to the node sequence
                         let node_len = node_seq.len();
-                        let (overlap_start_offset, overlap_end_offset) = if !step_handle.is_reverse() {
-                            // Forward handle - offsets from start of sequence
-                            let start_offset = (overlap_within_step_start - step_start).min(node_len);
-                            let end_offset = (overlap_within_step_end - step_start).min(node_len);
-                            (start_offset, end_offset)
-                        } else {
-                            // Reverse handle - offsets from end of sequence
-                            let start_offset = (step_end - overlap_within_step_end).min(node_len);
-                            let end_offset = (step_end - overlap_within_step_start).min(node_len);
-                            (start_offset, end_offset)
-                        };
+                        // Calculate offsets consistently regardless of strand
+                        let overlap_start_offset = (overlap_within_step_start - step_start).min(node_len);
+                        let overlap_end_offset = (overlap_within_step_end - step_start).min(node_len);
+
+                        if args.debug {
+                            eprintln!("    Splitting step {} [start={}, end={}, len={}] to remove overlap at [start={}, end={}]", 
+                                idx, step_start, step_end, step_end - step_start, overlap_within_step_start, overlap_within_step_end);
+                            eprintln!("    Overlap offsets: start={}, end={}", overlap_start_offset, overlap_end_offset);
+                        }
 
                         if step_start < overlap_start {
+                            if args.debug {
+                                eprintln!("    Adding left part of step [start={}, end={}]", step_start, overlap_within_step_start);
+                            }
+                            assert!(overlap_start_offset > 0);
+
                             // Keep left part
-                            let new_seq = &node_seq[0..overlap_start_offset];
-                            if !new_seq.is_empty() {
-                                let node_id = NodeId::from(next_node_id_value);
-                                next_node_id_value += 1;
-                                let new_node = combined_graph.create_handle(new_seq, node_id);
-                                let new_handle = if step_handle.is_reverse() {
-                                    new_node.flip()
-                                } else {
-                                    new_node
-                                };
+                            let new_seq = node_seq[0..overlap_start_offset].to_vec();
 
-                                new_steps.push(new_handle);
-                                new_step_positions.push((step_start, overlap_start));
-                                new_step_lengths.push(new_seq.len());
-                            }
+                            let node_id = NodeId::from(next_node_id_value);
+                            next_node_id_value += 1;
+                            let new_node = combined_graph.create_handle(&new_seq, node_id);
+
+                            new_steps.push(new_node);
+                            new_step_positions.push((step_start, overlap_start));
+                            new_step_lengths.push(new_seq.len());
                         } else if step_end > overlap_end {
-                            // Keep right part
-                            let new_seq = &node_seq[overlap_end_offset..];
-                            if !new_seq.is_empty() {
-                                let node_id = NodeId::from(next_node_id_value);
-                                next_node_id_value += 1;
-                                let new_node = combined_graph.create_handle(new_seq, node_id);
-                                let new_handle = if step_handle.is_reverse() {
-                                    new_node.flip()
-                                } else {
-                                    new_node
-                                };
-
-                                new_steps.push(new_handle);
-                                new_step_positions.push((overlap_end, step_end));
-                                new_step_lengths.push(new_seq.len());
+                            if args.debug {
+                                eprintln!("    Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
                             }
+                            assert!(overlap_end_offset < node_len);
+
+                            // Keep right part
+                            let new_seq = node_seq[overlap_end_offset..].to_vec();
+
+                            let node_id = NodeId::from(next_node_id_value);
+                            next_node_id_value += 1;
+                            let new_node = combined_graph.create_handle(&new_seq, node_id);
+
+                            new_steps.push(new_node);
+                            new_step_positions.push((overlap_end, step_end));
+                            new_step_lengths.push(new_seq.len());
                         }
                     } else {
                         // Keep steps that are not to be removed or split
