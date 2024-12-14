@@ -165,21 +165,21 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &Bi
 
     // Collect and sort paths directly with references to avoid multiple lookups
     let mut path_entries: Vec<_> = graph.paths.iter().collect();
-    path_entries.sort_by_key(|(_, path)| {
+    path_entries.sort_by_key(|(_, path_ref)| {
         // Get name directly from path struct instead of doing lookups
-        path.name.as_slice()
+        path_ref.name.as_slice()
     });
 
     // Write paths with new IDs
-    for (_path_id, path) in path_entries {
+    for (_path_id, path_ref) in path_entries {
         // Convert name bytes to string once
-        let path_name = String::from_utf8_lossy(&path.name);
+        let path_name = String::from_utf8_lossy(&path_ref.name);
         
         // Pre-allocate vector with capacity
-        let mut path_elements = Vec::with_capacity(path.nodes.len());
+        let mut path_elements = Vec::with_capacity(path_ref.nodes.len());
         
         // Process nodes directly from path reference
-        for handle in &path.nodes {
+        for handle in &path_ref.nodes {
             let new_id = id_mapping[u64::from(handle.id()) as usize];
             if new_id > 0 { // Only include nodes that weren't removed
                 let orient = if handle.is_reverse() { "-" } else { "+" };
@@ -241,23 +241,21 @@ fn main() {
                 // Get the path steps and translate their IDs
                 let mut translated_steps = Vec::new();
                 let mut step_positions = Vec::new();
-                let mut step_lengths = Vec::new();
                 let mut cumulative_pos = start;
 
-                    for step in path_ref.nodes.iter() {
-                        let translated_id = id_translation + step.id().into();
-                        let translated_step = Handle::pack(translated_id, step.is_reverse());
-                        translated_steps.push(translated_step);
+                for step in path_ref.nodes.iter() {
+                    let translated_id = id_translation + step.id().into();
+                    let translated_step = Handle::pack(translated_id, step.is_reverse());
+                    translated_steps.push(translated_step);
 
-                        // Get the sequence length of the node
-                        let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
-                        let node_length = node_seq.len();
-                        step_lengths.push(node_length);
+                    // Get the sequence length of the node
+                    let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
+                    let node_length = node_seq.len();
 
-                        // Record the end position of this step
-                        step_positions.push((cumulative_pos, cumulative_pos + node_length));
-                        cumulative_pos = cumulative_pos + node_length;
-                    }
+                    // Record the end position of this step
+                    step_positions.push((cumulative_pos, cumulative_pos + node_length));
+                    cumulative_pos = cumulative_pos + node_length;
+                }
 
                 if !translated_steps.is_empty() {
                     path_key_ranges.entry(sample_hap_name)
@@ -394,11 +392,9 @@ fn main() {
                 let overlap_end = std::cmp::min(r1.end, r2.end);
 
                 if args.debug {
-                    let overlap_amount = overlap_end - overlap_start;
-
                     eprintln!(
                         "  Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
-                        r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_amount
+                        r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_end - overlap_start
                     );
                 }
 
@@ -547,14 +543,17 @@ fn main() {
         let mut all_contiguous = true;
         
         for window in ranges.windows(2) {
-            if has_overlap(&window[0], &window[1]) {
+            let r1 = &window[0];
+            let r2 = &window[1];
+
+            if has_overlap(r1, r2) {
                 if args.debug {
                     eprintln!("Unresolved overlaps detected between ranges: [start={}, end={}] and [start={}, end={}]", 
-                    window[0].start, window[0].end, window[1].start, window[1].end);
+                    r1.start, r1.end, r2.start, r2.end);
                 }
                 panic!("Unresolved overlaps detected in path key '{}'", path_key);
             }
-            if !is_contiguous(&window[0], &window[1]) {
+            if !is_contiguous(r1, r2) {
                 all_contiguous = false;
             }
         }
@@ -718,9 +717,8 @@ mod tests {
             start,
             end,
             gfa_id,
-            steps: vec![],           // Empty steps for testing
+            steps: vec![],            // Empty steps for testing
             step_positions: vec![],   // Empty positions for testing
-            step_lengths: vec![],     // Empty lengths for testing
         }
     }
 
