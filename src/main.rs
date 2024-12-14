@@ -77,18 +77,27 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &Bi
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
     
-    // Collect and sort nodes by ID, excluding marked nodes
+    // Collect nodes, excluding marked nodes
     let mut nodes: Vec<Handle> = graph.handles()
         .filter(|handle| !nodes_to_remove[u64::from(handle.id()) as usize])
         .collect();
     nodes.sort_by_key(|handle| handle.id());
     
-    // Write sorted nodes (Segments)
-    for handle in nodes {
-        let sequence = graph.sequence(handle).collect::<Vec<_>>();
+    // Create mapping from old IDs to new sequential IDs using a Vec
+    // We allocate a vector with capacity for the max node ID
+    let max_id = u64::from(nodes.last().unwrap().id()) as usize;
+    let mut id_mapping = vec![0; max_id + 1];
+    for (new_id, handle) in nodes.iter().enumerate() {
+        id_mapping[u64::from(handle.id()) as usize] = new_id + 1; // +1 to start from 1
+    }
+    
+    // Write nodes with new IDs
+    for handle in &nodes {
+        let sequence = graph.sequence(*handle).collect::<Vec<_>>();
         let sequence_str = String::from_utf8(sequence)
             .unwrap_or_else(|_| String::from("N"));
-        writeln!(file, "S\t{}\t{}", handle.id(), sequence_str)?;
+        let new_id = id_mapping[u64::from(handle.id()) as usize];
+        writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
     }
     
     // Collect and sort edges, excluding those connected to marked nodes
@@ -103,17 +112,25 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &Bi
             .then(a.1.id().cmp(&b.1.id()))
     });
     
-    // Write sorted edges (Links)
+    // Write edges with new IDs
     for edge in edges {
-        let from_id = edge.0.id();
-        let to_id = edge.1.id();
+        let from_id = id_mapping[u64::from(edge.0.id()) as usize];
+        let to_id = id_mapping[u64::from(edge.1.id()) as usize];
         let from_orient = if edge.0.is_reverse() { "-" } else { "+" };
         let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
         writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
     }
     
-    // Write paths
-    for path_id in graph.path_ids() {
+    // Collect and sort paths by name
+    let mut paths: Vec<_> = graph.path_ids().collect();
+    paths.sort_by_key(|&path_id| {
+        graph.get_path_name(path_id)
+            .map(|name_iter| name_iter.collect::<Vec<u8>>())
+            .unwrap_or_default()
+    });
+
+    // Write paths with new IDs
+    for path_id in paths {
         if let Some(name_iter) = graph.get_path_name(path_id) {
             let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>())
                 .unwrap_or_else(|_| String::from("unknown_path"));
@@ -121,12 +138,17 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &Bi
             let mut path_elements = Vec::new();
             if let Some(path_ref) = graph.get_path_ref(path_id) {
                 for handle in &path_ref.nodes {
-                    let orient = if handle.is_reverse() { "-" } else { "+" };
-                    path_elements.push(format!("{}{}", handle.id(), orient));
+                    let new_id = id_mapping[u64::from(handle.id()) as usize];
+                    if new_id > 0 { // Only include nodes that weren't removed
+                        let orient = if handle.is_reverse() { "-" } else { "+" };
+                        path_elements.push(format!("{}{}", new_id, orient));
+                    }
                 }
             }
             
-            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+            if !path_elements.is_empty() {
+                writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+            }
         }
     }
     
