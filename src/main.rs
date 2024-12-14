@@ -40,8 +40,8 @@ struct RangeInfo {
     start: usize,
     end: usize,
     gfa_id: usize,
-    steps: Vec<Handle>,                    // Path steps for this range
-    step_positions: Vec<(usize, usize)>,   // Start and end positions of each step
+    steps: Vec<Handle>,     // Path steps for this range
+    step_ends: Vec<usize>,  // End positions of each step (start is either the range start (for index 0) or the previous step's end position)
 }
 
 // Helper function to check if two ranges are contiguous
@@ -240,7 +240,7 @@ fn main() {
             if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
                 // Get the path steps and translate their IDs
                 let mut translated_steps = Vec::new();
-                let mut step_positions = Vec::new();
+                let mut step_ends = Vec::new();
                 let mut cumulative_pos = start;
 
                 for step in path_ref.nodes.iter() {
@@ -248,13 +248,11 @@ fn main() {
                     let translated_step = Handle::pack(translated_id, step.is_reverse());
                     translated_steps.push(translated_step);
 
-                    // Get the sequence length of the node
+                    // Record the end position of this step
                     let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
                     let node_length = node_seq.len();
-
-                    // Record the end position of this step
-                    step_positions.push((cumulative_pos, cumulative_pos + node_length));
                     cumulative_pos = cumulative_pos + node_length;
+                    step_ends.push(cumulative_pos);
                 }
 
                 if !translated_steps.is_empty() {
@@ -265,7 +263,7 @@ fn main() {
                         end, 
                         gfa_id,
                         steps: translated_steps,
-                        step_positions,
+                        step_ends,
                     });
                 } else if args.debug {
                     eprintln!("  Warning: Path '{}' has no steps", path_name);
@@ -401,7 +399,8 @@ fn main() {
                 // Adjust r2 to remove the overlap
                 let mut steps_to_remove = Vec::new();
                 let mut step_to_split: Option<usize> = None;
-                for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
+                for (idx, &step_end) in r2.step_ends.iter().enumerate() {
+                    let step_start = if idx == 0 { r2.start } else { r2.step_ends[idx - 1] };
                     if step_end <= overlap_start {
                         // if args.debug && r2.start == 11000 {
                         //     eprintln!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
@@ -435,12 +434,14 @@ fn main() {
 
                 // Initialize new vectors to store updated steps
                 let mut new_steps = Vec::with_capacity(r2.steps.len() / 2);
-                let mut new_step_positions = Vec::with_capacity(r2.steps.len() / 2);
+                let mut new_step_ends = Vec::with_capacity(r2.steps.len() / 2);
+                let mut range_new_start = None;
 
                 // Iterate over the original steps
                 for idx in 0..r2.steps.len() {
                     let step_handle = r2.steps[idx];
-                    let (step_start, step_end) = r2.step_positions[idx];
+                    let step_start = if idx == 0 { r2.start } else { r2.step_ends[idx - 1] };
+                    let step_end = r2.step_ends[idx];
 
                     if steps_to_remove.contains(&idx) {
                         // Skip steps to remove
@@ -477,7 +478,10 @@ fn main() {
                             let new_node = combined_graph.create_handle(&new_seq, node_id);
 
                             new_steps.push(new_node);
-                            new_step_positions.push((step_start, overlap_start));
+                            new_step_ends.push(overlap_start);
+                            if range_new_start.is_none() {
+                                range_new_start = Some(step_start);
+                            }
                         } else if step_end > overlap_end {
                             if args.debug {
                                 eprintln!("    Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
@@ -492,18 +496,24 @@ fn main() {
                             let new_node = combined_graph.create_handle(&new_seq, node_id);
 
                             new_steps.push(new_node);
-                            new_step_positions.push((overlap_end, step_end));
+                            new_step_ends.push(step_end);
+                            if range_new_start.is_none() {
+                                range_new_start = Some(overlap_end);
+                            }
                         }
                     } else {
                         // Keep steps that are not to be removed or split
                         new_steps.push(step_handle);
-                        new_step_positions.push((step_start, step_end));
+                        new_step_ends.push(step_end);
+                        if range_new_start.is_none() {
+                            range_new_start = Some(step_start);
+                        }
                     }
                 }
 
                 // Update r2 with the new steps
                 r2.steps = new_steps;
-                r2.step_positions = new_step_positions;
+                r2.step_ends = new_step_ends;
 
                 // Update edges for the modified steps
                 for idx in 0..r2.steps.len() {
@@ -516,15 +526,14 @@ fn main() {
                 }
 
                 // Update r2.start and r2.end based on the new step positions
-                if !r2.step_positions.is_empty() {
-                    r2.start = r2.step_positions.first().unwrap().0;
-                    r2.end = r2.step_positions.last().unwrap().1;
+                if !r2.step_ends.is_empty() {
+                    r2.start = range_new_start.unwrap();  // Safe because if we have positions, we must have set range_new_start
+                    r2.end = *r2.step_ends.last().unwrap();
                 } else {
                     // If no steps remain, set start and end to overlap_end to effectively remove this range
                     r2.start = overlap_end;
                     r2.end = overlap_end;
                 }
-
 
                 if args.debug {
                     eprintln!("    Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
@@ -712,7 +721,7 @@ mod tests {
             end,
             gfa_id,
             steps: vec![],            // Empty steps for testing
-            step_positions: vec![],   // Empty positions for testing
+            step_ends: vec![],   // Empty positions for testing
         }
     }
 
