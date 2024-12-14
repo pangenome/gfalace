@@ -10,9 +10,6 @@ use handlegraph::{
     handlegraph::*,
     mutablehandlegraph::*,
     pathhandlegraph::{
-        IntoPathIds, 
-        GraphPathNames, 
-        GraphPathsRef,
         MutableGraphPaths,
         GraphPaths
     },
@@ -237,47 +234,43 @@ fn main() {
         }
 
         // Process paths and collect ranges with their steps
-        for path_id in block_graph.path_ids() {
-            if let Some(name_iter) = block_graph.get_path_name(path_id) {
-                let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>()).unwrap();
-                
-                if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
-                    // Get the path steps and translate their IDs
-                    let mut translated_steps = Vec::new();
-                    let mut step_positions = Vec::new();
-                    let mut step_lengths = Vec::new();
-                    let mut cumulative_pos = start;
+        for (_path_id, path_ref) in block_graph.paths.iter() {
+            let path_name = String::from_utf8_lossy(&path_ref.name);
+            
+            if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
+                // Get the path steps and translate their IDs
+                let mut translated_steps = Vec::new();
+                let mut step_positions = Vec::new();
+                let mut step_lengths = Vec::new();
+                let mut cumulative_pos = start;
 
-                    if let Some(path_ref) = block_graph.get_path_ref(path_id) {
-                        for step in path_ref.nodes.iter() {
-                            let translated_id = id_translation + step.id().into();
-                            let translated_step = Handle::pack(translated_id, step.is_reverse());
-                            translated_steps.push(translated_step);
+                    for step in path_ref.nodes.iter() {
+                        let translated_id = id_translation + step.id().into();
+                        let translated_step = Handle::pack(translated_id, step.is_reverse());
+                        translated_steps.push(translated_step);
 
-                            // Get the sequence length of the node
-                            let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
-                            let node_length = node_seq.len();
-                            step_lengths.push(node_length);
+                        // Get the sequence length of the node
+                        let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
+                        let node_length = node_seq.len();
+                        step_lengths.push(node_length);
 
-                            // Record the end position of this step
-                            step_positions.push((cumulative_pos, cumulative_pos + node_length));
-                            cumulative_pos = cumulative_pos + node_length;
-                        }
+                        // Record the end position of this step
+                        step_positions.push((cumulative_pos, cumulative_pos + node_length));
+                        cumulative_pos = cumulative_pos + node_length;
                     }
 
-                    if !translated_steps.is_empty() {
-                        path_key_ranges.entry(sample_hap_name)
-                        .or_default()
-                        .push(RangeInfo { 
-                            start, 
-                            end, 
-                            gfa_id,
-                            steps: translated_steps,
-                            step_positions,
-                        });
-                    } else if args.debug {
-                        eprintln!("  Warning: Path '{}' has no steps", path_name);
-                    }
+                if !translated_steps.is_empty() {
+                    path_key_ranges.entry(sample_hap_name)
+                    .or_default()
+                    .push(RangeInfo { 
+                        start, 
+                        end, 
+                        gfa_id,
+                        steps: translated_steps,
+                        step_positions,
+                    });
+                } else if args.debug {
+                    eprintln!("  Warning: Path '{}' has no steps", path_name);
                 }
             }
         }
