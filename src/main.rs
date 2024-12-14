@@ -267,6 +267,12 @@ fn main() {
                 continue;
             } else if prev_start >= curr_start && prev_end <= curr_end {
                 // Previous range is fully contained within current range
+                if args.debug {
+                    eprintln!(
+                        "  Containing range detected: Previous range [start={}, end={}] is fully contained within current range [start={}, end={}] and will be removed.",
+                        prev_start, prev_end, curr_start, curr_end
+                    );
+                }
                 ranges.swap(write_idx, read_idx);
             } else if curr_start < prev_end {
                 // Handle overlapping ranges
@@ -280,6 +286,12 @@ fn main() {
                         let extension_beyond_prev = curr_end - prev_end;
                         let overlap_with_prev = prev_end - curr_start;
                         if extension_beyond_prev < overlap_with_prev {
+                            if args.debug {
+                                eprintln!(
+                                    "  Overlapping range detected: Range [start={}, end={}] is overlapped by both previous range [start={}, end={}] and next range [start={}, end={}] and will be removed.",
+                                    curr_start, curr_end, prev_start, prev_end, next_start, next_end
+                                );
+                            }
                             continue;
                         }
                     }
