@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeMap,
     fs::File,
     io::{self, Write},
     path::Path,
 };
+use rustc_hash::FxHashMap;
 use clap::Parser;
 use handlegraph::{
     handle::{Handle, NodeId, Edge},
@@ -206,7 +206,7 @@ fn main() {
 
     // Create a single combined graph
     let mut combined_graph = HashGraph::new();
-    let mut path_key_ranges: BTreeMap<String, Vec<RangeInfo>> = BTreeMap::new();
+    let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
     let mut id_translations = Vec::new();
 
     // Process each GFA file

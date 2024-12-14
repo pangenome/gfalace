@@ -13,3 +13,4 @@ handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e42
 gfa = "0.10.1"
 bitvec = "1.0.1"
 tempfile = "3.14.0"
+rustc-hash = "2.1.0"
