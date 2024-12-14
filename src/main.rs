@@ -247,6 +247,7 @@ fn main() {
             let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
 
             if curr_start == prev_start && curr_end == prev_end {
+                // Skip duplicate range
                 // Current range is a duplicate of the previous range, skip it
                 if args.debug {
                     eprintln!(
@@ -256,17 +257,38 @@ fn main() {
                 }
                 continue;
             } else if curr_start >= prev_start && curr_end <= prev_end {
-                // Current range is contained within previous range, skip it
-                continue;
-            } else if prev_start >= curr_start && prev_end <= curr_end {
-                // Previous range is contained within current range
+                // Skip range that is fully contained within previous range
                 if args.debug {
                     eprintln!(
-                        "  Redundant range detected: Range [start={}, end={}, len={}] is contained within [start={}, end={} | len={}] and will be removed.",
-                        prev_start, prev_end, prev_end - prev_start, curr_start, curr_end, curr_end - curr_start
+                        "  Contained range detected: Range [start={}, end={}] is fully contained within previous range [start={}, end={}] and will be removed.",
+                        curr_start, curr_end, prev_start, prev_end
                     );
                 }
+                continue;
+            } else if prev_start >= curr_start && prev_end <= curr_end {
+                // Previous range is fully contained within current range
                 ranges.swap(write_idx, read_idx);
+            } else if curr_start < prev_end {
+                // Handle overlapping ranges
+                if read_idx < ranges.len() - 1 {
+                    let next_start = ranges[read_idx + 1].start;
+                    let next_end = ranges[read_idx + 1].end;
+                    
+                    // Only skip current range if it's substantially overlapped by both prev and next ranges
+                    if curr_start > prev_start && next_start < curr_end && next_end > curr_end {
+                        // Check if the current range doesn't extend far enough beyond previous range
+                        let extension_beyond_prev = curr_end - prev_end;
+                        let overlap_with_prev = prev_end - curr_start;
+                        if extension_beyond_prev < overlap_with_prev {
+                            continue;
+                        }
+                    }
+                }
+                // Keep current range
+                write_idx += 1;
+                if write_idx != read_idx {
+                    ranges.swap(write_idx, read_idx);
+                }
             } else {
                 // No containment, advance write_idx and copy current range
                 write_idx += 1;
@@ -314,17 +336,17 @@ fn main() {
                 let mut step_to_split: Option<usize> = None;
                 for (idx, &(step_start, step_end)) in r2.step_positions.iter().enumerate() {
                     if step_end <= overlap_start {
-                        // if args.debug {
+                        // if args.debug && r2.start == 11000 {
                         //     eprintln!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
                         // }
                         continue;
                     } else if step_start >= overlap_end {
-                        // if args.debug {
+                        // if args.debug && r2.start == 11000 {
                         //     eprintln!("    Step {} [start={}, end={}, len={}] after overlap", idx, step_start, step_end, step_end - step_start);
                         // }
                         break;
                     } else if step_start >= overlap_start && step_end <= overlap_end {
-                        // if args.debug {
+                        // if args.debug && r2.start == 11000 {
                         //     eprintln!("    Step {} [start={}, end={}, len={}] fully overlaps", idx, step_start, step_end, step_end - step_start);
                         // }
                         steps_to_remove.push(idx);
@@ -591,4 +613,181 @@ fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper function to create a simple RangeInfo for testing
+    fn create_range_info(start: usize, end: usize, gfa_id: usize) -> RangeInfo {
+        RangeInfo {
+            start,
+            end,
+            gfa_id,
+            steps: vec![],           // Empty steps for testing
+            step_positions: vec![],   // Empty positions for testing
+            step_lengths: vec![],     // Empty lengths for testing
+        }
+    }
+
+    #[test]
+    fn test_range_containment_removal() {
+        // Test cases
+        let test_cases = vec![
+            // Test case 1: Basic containment
+            (
+                vec![(10, 50, 0), (20, 30, 1)],  // Input ranges (start, end, gfa_id)
+                vec![(10, 50, 0)],               // Expected result
+                "Basic containment"
+            ),
+            
+            // Test case 2: No containment
+            (
+                vec![(10, 20, 0), (30, 40, 1)],
+                vec![(10, 20, 0), (30, 40, 1)],
+                "No containment"
+            ),
+            
+            // Test case 3: Multiple contained ranges
+            (
+                vec![(10, 100, 0), (20, 30, 1), (40, 50, 2), (60, 70, 3)],
+                vec![(10, 100, 0)],
+                "Multiple contained ranges"
+            ),
+            
+            // Test case 4: Identical ranges
+            (
+                vec![(10, 20, 0), (10, 20, 1)],
+                vec![(10, 20, 0)],
+                "Identical ranges"
+            ),
+            
+            // Test case 5: Nested containment
+            (
+                vec![(10, 100, 0), (20, 80, 1), (30, 40, 2)],
+                vec![(10, 100, 0)],
+                "Nested containment"
+            ),
+            
+            // Test case 6: Partial overlap (should keep both)
+            (
+                vec![(10, 30, 0), (20, 40, 1)],
+                vec![(10, 30, 0), (20, 40, 1)],
+                "Partial overlap"
+            ),
+            
+            // Test case 7: Edge cases - touching ranges
+            (
+                vec![(10, 20, 0), (20, 30, 1)],
+                vec![(10, 20, 0), (20, 30, 1)],
+                "Touching ranges"
+            ),
+
+            // Test case 8: Overlapping ranges from same GFA
+            (
+                vec![(0, 11742, 0), (9714, 13000, 1), (11000, 19000, 1)],
+                vec![(0, 11742, 0), (11000, 19000, 1)],
+                "Overlapping ranges from same GFA"
+            ),
+
+            // Test case 9: Overlapping ranges with different GFA IDs
+            (
+                vec![(0, 11742, 0), (9714, 13000, 1), (11000, 19000, 2)],
+                vec![(0, 11742, 0), (11000, 19000, 2)],
+                "Overlapping ranges"
+            ),
+
+            // Test case 10: Overlapping ranges with different GFA IDs 2
+            (
+                vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
+                vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
+                "Overlapping ranges"
+            ),
+        ];
+
+        // Run each test case
+        for (case_index, (input_ranges, expected_ranges, case_name)) in test_cases.iter().enumerate() {
+            println!("Running test case {}: {}", case_index + 1, case_name);
+            
+            // Create input ranges
+            let mut ranges: Vec<RangeInfo> = input_ranges
+                .iter()
+                .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
+                .collect();
+// Sort ranges by start position
+ranges.sort_by_key(|r| (r.start, r.end));
+
+let mut write_idx = 0;
+for read_idx in 1..ranges.len() {
+    let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
+    let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
+
+    if curr_start == prev_start && curr_end == prev_end {
+        // Skip duplicate range
+        continue;
+    } else if curr_start >= prev_start && curr_end <= prev_end {
+        // Skip range that is fully contained within previous range
+        continue;
+    } else if prev_start >= curr_start && prev_end <= curr_end {
+        // Previous range is fully contained within current range
+        ranges.swap(write_idx, read_idx);
+    } else if curr_start < prev_end {
+        // Handle overlapping ranges
+        if read_idx < ranges.len() - 1 {
+            let next_start = ranges[read_idx + 1].start;
+            let next_end = ranges[read_idx + 1].end;
+            
+            // Only skip current range if it's substantially overlapped by both prev and next ranges
+            if curr_start > prev_start && next_start < curr_end && next_end > curr_end {
+                // Check if the current range doesn't extend far enough beyond previous range
+                let extension_beyond_prev = curr_end - prev_end;
+                let overlap_with_prev = prev_end - curr_start;
+                if extension_beyond_prev < overlap_with_prev {
+                    continue;
+                }
+            }
+        }
+        // Keep current range
+        write_idx += 1;
+        if write_idx != read_idx {
+            ranges.swap(write_idx, read_idx);
+        }
+    } else {
+        // No overlap - keep both ranges
+        write_idx += 1;
+        if write_idx != read_idx {
+            ranges.swap(write_idx, read_idx);
+        }
+    }
+}
+ranges.truncate(write_idx + 1);
+
+            // Create expected ranges
+            let expected: Vec<RangeInfo> = expected_ranges
+                .iter()
+                .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
+                .collect();
+
+            // Compare results
+            assert_eq!(
+                ranges.len(),
+                expected.len(),
+                "Test case '{}': Wrong number of ranges after containment removal",
+                case_name
+            );
+
+            for (i, (result, expected)) in ranges.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    (result.start, result.end, result.gfa_id),
+                    (expected.start, expected.end, expected.gfa_id),
+                    "Test case '{}': Mismatch at position {}",
+                    case_name,
+                    i
+                );
+            }
+            
+            println!("Test case {} passed: {}", case_index + 1, case_name);
+        }
+    }
 }
