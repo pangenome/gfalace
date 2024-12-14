@@ -9,6 +9,7 @@ use handlegraph::pathhandlegraph::{IntoPathIds, GraphPathNames, GraphPathsRef, M
 use handlegraph::hashgraph::HashGraph;
 //use handlegraph::pathhandlegraph::PathStep;
 use gfa::{gfa::GFA, parser::GFAParser};
+use bitvec::{bitvec, prelude::BitVec};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
@@ -70,14 +71,16 @@ fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> std::io::Result<GF
     }
 }
 
-fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
+fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &BitVec) -> std::io::Result<()> {
     let mut file = File::create(output_path)?;
     
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
     
-    // Collect and sort nodes by ID
-    let mut nodes: Vec<Handle> = graph.handles().collect();
+    // Collect and sort nodes by ID, excluding marked nodes
+    let mut nodes: Vec<Handle> = graph.handles()
+        .filter(|handle| !nodes_to_remove[u64::from(handle.id()) as usize])
+        .collect();
     nodes.sort_by_key(|handle| handle.id());
     
     // Write sorted nodes (Segments)
@@ -88,8 +91,13 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<(
         writeln!(file, "S\t{}\t{}", handle.id(), sequence_str)?;
     }
     
-    // Collect and sort edges
-    let mut edges: Vec<Edge> = graph.edges().collect();
+    // Collect and sort edges, excluding those connected to marked nodes
+    let mut edges: Vec<Edge> = graph.edges()
+        .filter(|edge| {
+            !nodes_to_remove[u64::from(edge.0.id()) as usize] && 
+            !nodes_to_remove[u64::from(edge.1.id()) as usize]
+        })
+        .collect();
     edges.sort_by(|a, b| {
         a.0.id().cmp(&b.0.id())
             .then(a.1.id().cmp(&b.1.id()))
@@ -104,16 +112,8 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<(
         writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
     }
     
-    // Collect and sort paths by name
-    let mut paths: Vec<_> = graph.path_ids().collect();
-    paths.sort_by_key(|&path_id| {
-        graph.get_path_name(path_id)
-            .map(|name_iter| name_iter.collect::<Vec<u8>>())
-            .unwrap_or_default()
-    });
-    
-    // Write sorted paths
-    for path_id in paths {
+    // Write paths
+    for path_id in graph.path_ids() {
         if let Some(name_iter) = graph.get_path_name(path_id) {
             let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>())
                 .unwrap_or_else(|_| String::from("unknown_path"));
@@ -661,11 +661,40 @@ fn main() {
         eprintln!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
     }
 
-    // Write the combined graph to GFA file
-    match write_graph_to_gfa(&combined_graph, &args.output) {
+    // After all paths are created but before writing the graph
+    if args.debug {
+        eprintln!("Total nodes before filtering: {}", combined_graph.node_count());
+    }
+    
+    let nodes_to_skip = mark_nodes_for_removal(&combined_graph);
+    
+    if args.debug {
+        eprintln!("Nodes to be filtered out: {}", nodes_to_skip.count_ones());
+    }
+
+    // Write the combined graph to GFA file, skipping unused nodes
+    match write_graph_to_gfa(&combined_graph, &args.output, &nodes_to_skip) {
         Ok(_) => if args.debug {eprintln!("Successfully wrote combined graph to {}", args.output)},
         Err(e) => eprintln!("Error writing GFA file: {}", e),
     }
+}
+
+
+fn mark_nodes_for_removal(graph: &HashGraph) -> BitVec {
+    // Create a bitvector with all nodes initially marked for removal
+    let max_node_id = u64::from(graph.max_node_id());
+    let mut nodes_to_remove = bitvec![1; max_node_id as usize + 1];
+    
+    // Mark nodes used in paths as not to be removed (set bit to 0)
+    for path_id in graph.path_ids() {
+        if let Some(path_ref) = graph.get_path_ref(path_id) {
+            for handle in &path_ref.nodes {
+                nodes_to_remove.set(u64::from(handle.id()) as usize, false);
+            }
+        }
+    }
+    
+    nodes_to_remove
 }
 
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
