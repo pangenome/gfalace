@@ -45,7 +45,6 @@ struct RangeInfo {
     gfa_id: usize,
     steps: Vec<Handle>,                    // Path steps for this range
     step_positions: Vec<(usize, usize)>,   // Start and end positions of each step
-    step_lengths: Vec<usize>,              // Lengths of each step
 }
 
 // Helper function to check if two ranges are contiguous
@@ -277,7 +276,6 @@ fn main() {
                             gfa_id,
                             steps: translated_steps,
                             step_positions,
-                            step_lengths,
                         });
                     } else if args.debug {
                         eprintln!("  Warning: Path '{}' has no steps", path_name);
@@ -384,15 +382,12 @@ fn main() {
         }
         ranges.truncate(write_idx + 1);
         
-
         if args.debug {
             eprintln!("Path key '{}' without redundancy", path_key);
             for range in ranges.iter() {
                 eprintln!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
             }
-        }
 
-        if args.debug {
             eprintln!("Trimming overlapping ranges");
         }
 
@@ -454,7 +449,6 @@ fn main() {
                 // Initialize new vectors to store updated steps
                 let mut new_steps = Vec::new();
                 let mut new_step_positions = Vec::new();
-                let mut new_step_lengths = Vec::new();
 
                 // Iterate over the original steps
                 for idx in 0..r2.steps.len() {
@@ -497,7 +491,6 @@ fn main() {
 
                             new_steps.push(new_node);
                             new_step_positions.push((step_start, overlap_start));
-                            new_step_lengths.push(new_seq.len());
                         } else if step_end > overlap_end {
                             if args.debug {
                                 eprintln!("    Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
@@ -513,20 +506,17 @@ fn main() {
 
                             new_steps.push(new_node);
                             new_step_positions.push((overlap_end, step_end));
-                            new_step_lengths.push(new_seq.len());
                         }
                     } else {
                         // Keep steps that are not to be removed or split
                         new_steps.push(step_handle);
                         new_step_positions.push((step_start, step_end));
-                        new_step_lengths.push(r2.step_lengths[idx]);
                     }
                 }
 
                 // Update r2 with the new steps
                 r2.steps = new_steps;
                 r2.step_positions = new_step_positions;
-                r2.step_lengths = new_step_lengths;
 
                 // Update edges for the modified steps
                 for idx in 0..r2.steps.len() {
