@@ -1,15 +1,26 @@
-use std::collections::{BTreeMap};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{self, Write},
+    path::Path,
+};
 use clap::Parser;
-use std::fs::File;
-use std::io::Write;
-use handlegraph::handle::{Handle, NodeId, Edge};
-use handlegraph::handlegraph::*;
-use handlegraph::mutablehandlegraph::*;
-use handlegraph::pathhandlegraph::{IntoPathIds, GraphPathNames, GraphPathsRef, MutableGraphPaths, GraphPaths};
-use handlegraph::hashgraph::HashGraph;
-//use handlegraph::pathhandlegraph::PathStep;
+use handlegraph::{
+    handle::{Handle, NodeId, Edge},
+    handlegraph::*,
+    mutablehandlegraph::*,
+    pathhandlegraph::{
+        IntoPathIds, 
+        GraphPathNames, 
+        GraphPathsRef,
+        MutableGraphPaths,
+        GraphPaths
+    },
+    hashgraph::HashGraph,
+};
 use gfa::{gfa::GFA, parser::GFAParser};
 use bitvec::{bitvec, prelude::BitVec};
+use tempfile::NamedTempFile;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
@@ -47,27 +58,62 @@ fn has_overlap(r1: &RangeInfo, r2: &RangeInfo) -> bool {
     r1.start < r2.end && r2.start < r1.end
 }
 
-// Helper function to read GFA file
-fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> std::io::Result<GFA<usize, ()>> {
+fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> io::Result<GFA<usize, ()>> {
     if gfa_path.ends_with(".gz") {
-        let file = std::fs::File::open(gfa_path)?;
-        let (mut reader, _format) = niffler::get_reader(Box::new(file)).unwrap();
+        let file = std::fs::File::open(gfa_path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("Failed to open gzipped file '{}': {}", gfa_path, e)
+            )
+        })?;
+        
+        let (mut reader, _format) = niffler::get_reader(Box::new(file))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         
         let mut decompressed = Vec::new();
-        reader.read_to_end(&mut decompressed)?;
+        reader.read_to_end(&mut decompressed).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("Failed to decompress file '{}': {}", gfa_path, e)
+            )
+        })?;
         
-        let temp_path = format!("{}.tmp", gfa_path);
-        {
-            let mut temp_file = std::fs::File::create(&temp_path)?;
-            temp_file.write_all(&decompressed)?;
-        }
+        // Create temporary file in the same directory as the input file for better performance
+        let parent_dir = Path::new(gfa_path).parent().unwrap_or(Path::new("."));
+        let temp_file = NamedTempFile::new_in(parent_dir).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("Failed to create temporary file: {}", e)
+            )
+        })?;
         
-        let result = parser.parse_file(&temp_path).unwrap();
-        std::fs::remove_file(&temp_path)?;
+        // Write decompressed data
+        temp_file.as_file().write_all(&decompressed).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("Failed to write to temporary file: {}", e)
+            )
+        })?;
         
-        Ok(result)
+        // Parse GFA
+        parser.parse_file(temp_file.path().to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid temporary file path"
+            )
+        })?).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse GFA: {}", e)
+            )
+        })
     } else {
-        Ok(parser.parse_file(gfa_path).unwrap())
+        parser.parse_file(gfa_path).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse GFA file '{}': {}", gfa_path, e)
+            )
+        })
     }
 }
 
@@ -120,7 +166,7 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &Bi
         let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
         writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
     }
-    
+
     // Collect and sort paths by name
     let mut paths: Vec<_> = graph.path_ids().collect();
     paths.sort_by_key(|&path_id| {
