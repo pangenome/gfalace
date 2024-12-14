@@ -22,11 +22,11 @@ use tempfile::NamedTempFile;
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
-    /// List of GFA file paths.
+    /// List of GFA file paths to combine
     #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
     gfa_list: Vec<String>,
 
-    /// Output GFA file path
+    /// Output GFA file path for the combined graph
     #[clap(short, long, value_parser)]
     output: String,
 
@@ -418,7 +418,7 @@ fn main() {
                         // }
                         steps_to_remove.push(idx);
                     } else {
-                        // if args.debug {
+                        // if args.debug && r2.start == 11000 {
                         //     eprintln!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
                         // }
                         if step_to_split.is_some() {
@@ -428,10 +428,10 @@ fn main() {
                     }
                 }
 
-                if args.debug && r2.start == 154089 {
-                    eprintln!("    Total steps to remove: {}", steps_to_remove.len());
-                    eprintln!("    Step to split: {:?}", step_to_split);   
-                }
+                // if args.debug && r2.start == 11000 {
+                //     eprintln!("    Total steps to remove: {}", steps_to_remove.len());
+                //     eprintln!("    Step to split: {:?}", step_to_split);   
+                // }
 
                 // Initialize new vectors to store updated steps
                 let mut new_steps = Vec::with_capacity(r2.steps.len() / 2);
@@ -561,17 +561,15 @@ fn main() {
         if !all_contiguous && args.debug {
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
-            let mut current_gfa_ids = vec![ranges[0].gfa_id];
             
             for i in 1..ranges.len() {
                 if is_contiguous(&ranges[i-1], &ranges[i]) {
                     // Extend current merged range
                     current_end = ranges[i].end;
-                    current_gfa_ids.push(ranges[i].gfa_id);
                 } else {
                     // Print current merged range
-                    eprintln!("    Merged range: start={}, end={}, gfa_ids={:?}", 
-                        current_start, current_end, current_gfa_ids);
+                    eprintln!("    Merged range: start={}, end={}", 
+                        current_start, current_end);
                     
                     if !has_overlap(&ranges[i-1], &ranges[i]) {
                         // Calculate and print gap
@@ -586,13 +584,12 @@ fn main() {
                     // Start new merged range
                     current_start = ranges[i].start;
                     current_end = ranges[i].end;
-                    current_gfa_ids = vec![ranges[i].gfa_id];
                 }
             }
             
             // Print final merged range
-            eprintln!("    Merged range: start={}, end={}, gfa_ids={:?}", 
-                current_start, current_end, current_gfa_ids);
+            eprintln!("    Merged range: start={}, end={}", 
+                current_start, current_end);
         }
 
         if all_contiguous {
@@ -654,10 +651,7 @@ fn main() {
 
     if args.debug {
         eprintln!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
-    }
 
-    // After all paths are created but before writing the graph
-    if args.debug {
         eprintln!("Total nodes before filtering: {}", combined_graph.node_count());
     }
     
