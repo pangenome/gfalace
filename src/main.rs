@@ -245,7 +245,7 @@ fn main() {
         for read_idx in 1..ranges.len() {
             let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
             let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
-
+        
             if curr_start == prev_start && curr_end == prev_end {
                 // Skip duplicate range
                 // Current range is a duplicate of the previous range, skip it
@@ -275,23 +275,83 @@ fn main() {
                 }
                 ranges.swap(write_idx, read_idx);
             } else if curr_start < prev_end {
+                // Handle overlapping ranges - check both previous and next ranges
+                let mut should_skip = false;
+                
+                if read_idx < ranges.len() - 1 {
+                    let next_start = ranges[read_idx + 1].start;
+                    
+                    // Check if current range is significantly overlapped by both neighbors
+                    if curr_start > prev_start && next_start < curr_end {
+                        let overlap_with_prev = prev_end - curr_start;
+                        let overlap_with_next = curr_end - next_start;
+                        let range_length = curr_end - curr_start;
+                        
+                        // Skip if the range is mostly covered by its neighbors
+                        if overlap_with_prev + overlap_with_next > range_length {
+                            should_skip = true;
+                        }
+                    }
+                }
+                
+                if !should_skip {
+                    if args.debug {
+                        eprintln!(
+                            "  Overlapping range detected: Range [start={}, end={}] overlaps with previous range [start={}, end={}] and will be kept.",
+                            curr_start, curr_end, prev_start, prev_end
+                        );
+                    }
+                    write_idx += 1;
+                    if write_idx != read_idx {
+                        ranges.swap(write_idx, read_idx);
+                    }
+                }
+            } else {
+                // No overlap - keep both ranges
+                write_idx += 1;
+                if write_idx != read_idx {
+                    ranges.swap(write_idx, read_idx);
+                }
+            }
+        }
+        ranges.truncate(write_idx + 1);
+        
+
+        if args.debug {
+            eprintln!("Path key '{}' without redundancy", path_key);
+            for range in ranges.iter() {
+                eprintln!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            }
+        }
+
+        let mut write_idx = 0;
+        for read_idx in 1..ranges.len() {
+            let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
+            let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
+        
+            if curr_start == prev_start && curr_end == prev_end {
+                // Skip duplicate range
+                continue;
+            } else if curr_start >= prev_start && curr_end <= prev_end {
+                // Skip range that is fully contained within previous range
+                continue;
+            } else if prev_start >= curr_start && prev_end <= curr_end {
+                // Previous range is fully contained within current range
+                ranges.swap(write_idx, read_idx);
+            } else if curr_start < prev_end {
                 // Handle overlapping ranges
                 if read_idx < ranges.len() - 1 {
                     let next_start = ranges[read_idx + 1].start;
-                    let next_end = ranges[read_idx + 1].end;
                     
-                    // Only skip current range if it's substantially overlapped by both prev and next ranges
-                    if curr_start > prev_start && next_start < curr_end && next_end > curr_end {
-                        // Check if the current range doesn't extend far enough beyond previous range
-                        let extension_beyond_prev = curr_end - prev_end;
+                    // Check if current range is significantly overlapped by both previous and next ranges
+                    if curr_start > prev_start && next_start < curr_end {
+                        // Calculate overlap percentages
                         let overlap_with_prev = prev_end - curr_start;
-                        if extension_beyond_prev < overlap_with_prev {
-                            if args.debug {
-                                eprintln!(
-                                    "  Overlapping range detected: Range [start={}, end={}] is overlapped by both previous range [start={}, end={}] and next range [start={}, end={}] and will be removed.",
-                                    curr_start, curr_end, prev_start, prev_end, next_start, next_end
-                                );
-                            }
+                        let overlap_with_next = curr_end - next_start;
+                        let range_length = curr_end - curr_start;
+                        
+                        // If the range is mostly overlapped by both neighbors, skip it
+                        if overlap_with_prev + overlap_with_next > range_length {
                             continue;
                         }
                     }
@@ -302,18 +362,16 @@ fn main() {
                     ranges.swap(write_idx, read_idx);
                 }
             } else {
-                // No containment, advance write_idx and copy current range
+                // No overlap - keep both ranges
                 write_idx += 1;
                 if write_idx != read_idx {
                     ranges.swap(write_idx, read_idx);
                 }
             }
         }
-        // Truncate the ranges vector to remove any skipped elements
         ranges.truncate(write_idx + 1);
-
         if args.debug {
-            eprintln!("Path key '{}' without redundancy", path_key);
+            eprintln!("Path key '{}' without redundancy 2", path_key);
             for range in ranges.iter() {
                 eprintln!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
             }
@@ -716,6 +774,13 @@ mod tests {
                 vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
                 "Overlapping ranges"
             ),
+
+            // Test case 11: Overlapping ranges with different GFA IDs 3
+            (
+                vec![(8000, 11000, 0), (9694, 12313, 1), (10908, 13908, 2)],
+                vec![(8000, 11000, 0), (10908, 13908, 2)],
+                "Overlapping ranges"
+            ),
         ];
 
         // Run each test case
@@ -745,25 +810,30 @@ for read_idx in 1..ranges.len() {
         // Previous range is fully contained within current range
         ranges.swap(write_idx, read_idx);
     } else if curr_start < prev_end {
-        // Handle overlapping ranges
+        // Handle overlapping ranges - check both previous and next ranges
+        let mut should_skip = false;
+        
         if read_idx < ranges.len() - 1 {
             let next_start = ranges[read_idx + 1].start;
-            let next_end = ranges[read_idx + 1].end;
             
-            // Only skip current range if it's substantially overlapped by both prev and next ranges
-            if curr_start > prev_start && next_start < curr_end && next_end > curr_end {
-                // Check if the current range doesn't extend far enough beyond previous range
-                let extension_beyond_prev = curr_end - prev_end;
+            // Check if current range is significantly overlapped by both neighbors
+            if curr_start > prev_start && next_start < curr_end {
                 let overlap_with_prev = prev_end - curr_start;
-                if extension_beyond_prev < overlap_with_prev {
-                    continue;
+                let overlap_with_next = curr_end - next_start;
+                let range_length = curr_end - curr_start;
+                
+                // Skip if the range is mostly covered by its neighbors
+                if overlap_with_prev + overlap_with_next > range_length {
+                    should_skip = true;
                 }
             }
         }
-        // Keep current range
-        write_idx += 1;
-        if write_idx != read_idx {
-            ranges.swap(write_idx, read_idx);
+        
+        if !should_skip {
+            write_idx += 1;
+            if write_idx != read_idx {
+                ranges.swap(write_idx, read_idx);
+            }
         }
     } else {
         // No overlap - keep both ranges
