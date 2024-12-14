@@ -166,37 +166,35 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &Bi
         writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
     }
 
-    // Collect and sort paths by name
-    let mut paths: Vec<_> = graph.path_ids().collect();
-    paths.sort_by_key(|&path_id| {
-        graph.get_path_name(path_id)
-            .map(|name_iter| name_iter.collect::<Vec<u8>>())
-            .unwrap_or_default()
+    // Collect and sort paths directly with references to avoid multiple lookups
+    let mut path_entries: Vec<_> = graph.paths.iter().collect();
+    path_entries.sort_by_key(|(_, path)| {
+        // Get name directly from path struct instead of doing lookups
+        path.name.as_slice()
     });
 
     // Write paths with new IDs
-    for path_id in paths {
-        if let Some(name_iter) = graph.get_path_name(path_id) {
-            let path_name = String::from_utf8(name_iter.collect::<Vec<u8>>())
-                .unwrap_or_else(|_| String::from("unknown_path"));
-            
-            let mut path_elements = Vec::new();
-            if let Some(path_ref) = graph.get_path_ref(path_id) {
-                for handle in &path_ref.nodes {
-                    let new_id = id_mapping[u64::from(handle.id()) as usize];
-                    if new_id > 0 { // Only include nodes that weren't removed
-                        let orient = if handle.is_reverse() { "-" } else { "+" };
-                        path_elements.push(format!("{}{}", new_id, orient));
-                    }
-                }
-            }
-            
-            if !path_elements.is_empty() {
-                writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+    for (_path_id, path) in path_entries {
+        // Convert name bytes to string once
+        let path_name = String::from_utf8_lossy(&path.name);
+        
+        // Pre-allocate vector with capacity
+        let mut path_elements = Vec::with_capacity(path.nodes.len());
+        
+        // Process nodes directly from path reference
+        for handle in &path.nodes {
+            let new_id = id_mapping[u64::from(handle.id()) as usize];
+            if new_id > 0 { // Only include nodes that weren't removed
+                let orient = if handle.is_reverse() { "-" } else { "+" };
+                path_elements.push(format!("{}{}", new_id, orient));
             }
         }
+        
+        if !path_elements.is_empty() {
+            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+        }
     }
-    
+        
     Ok(())
 }
 
@@ -447,8 +445,8 @@ fn main() {
                 }
 
                 // Initialize new vectors to store updated steps
-                let mut new_steps = Vec::new();
-                let mut new_step_positions = Vec::new();
+                let mut new_steps = Vec::with_capacity(r2.steps.len() / 2);
+                let mut new_step_positions = Vec::with_capacity(r2.steps.len() / 2);
 
                 // Iterate over the original steps
                 for idx in 0..r2.steps.len() {
@@ -691,11 +689,9 @@ fn mark_nodes_for_removal(graph: &HashGraph) -> BitVec {
     let mut nodes_to_remove = bitvec![1; max_node_id as usize + 1];
     
     // Mark nodes used in paths as not to be removed (set bit to 0)
-    for path_id in graph.path_ids() {
-        if let Some(path_ref) = graph.get_path_ref(path_id) {
-            for handle in &path_ref.nodes {
-                nodes_to_remove.set(u64::from(handle.id()) as usize, false);
-            }
+    for (_path_id, path_ref) in graph.paths.iter() {
+        for handle in &path_ref.nodes {
+            nodes_to_remove.set(u64::from(handle.id()) as usize, false);
         }
     }
     
@@ -826,58 +822,59 @@ mod tests {
                 .iter()
                 .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
                 .collect();
-// Sort ranges by start position
-ranges.sort_by_key(|r| (r.start, r.end));
 
-let mut write_idx = 0;
-for read_idx in 1..ranges.len() {
-    let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
-    let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
+            // Sort ranges by start position
+            ranges.sort_by_key(|r| (r.start, r.end));
 
-    if curr_start == prev_start && curr_end == prev_end {
-        // Skip duplicate range
-        continue;
-    } else if curr_start >= prev_start && curr_end <= prev_end {
-        // Skip range that is fully contained within previous range
-        continue;
-    } else if prev_start >= curr_start && prev_end <= curr_end {
-        // Previous range is fully contained within current range
-        ranges.swap(write_idx, read_idx);
-    } else if curr_start < prev_end {
-        // Handle overlapping ranges - check both previous and next ranges
-        let mut should_skip = false;
-        
-        if read_idx < ranges.len() - 1 {
-            let next_start = ranges[read_idx + 1].start;
-            
-            // Check if current range is significantly overlapped by both neighbors
-            if curr_start > prev_start && next_start < curr_end {
-                let overlap_with_prev = prev_end - curr_start;
-                let overlap_with_next = curr_end - next_start;
-                let range_length = curr_end - curr_start;
-                
-                // Skip if the range is mostly covered by its neighbors
-                if overlap_with_prev + overlap_with_next > range_length {
-                    should_skip = true;
+            let mut write_idx = 0;
+            for read_idx in 1..ranges.len() {
+                let (prev_start, prev_end) = (ranges[write_idx].start, ranges[write_idx].end);
+                let (curr_start, curr_end) = (ranges[read_idx].start, ranges[read_idx].end);
+
+                if curr_start == prev_start && curr_end == prev_end {
+                    // Skip duplicate range
+                    continue;
+                } else if curr_start >= prev_start && curr_end <= prev_end {
+                    // Skip range that is fully contained within previous range
+                    continue;
+                } else if prev_start >= curr_start && prev_end <= curr_end {
+                    // Previous range is fully contained within current range
+                    ranges.swap(write_idx, read_idx);
+                } else if curr_start < prev_end {
+                    // Handle overlapping ranges - check both previous and next ranges
+                    let mut should_skip = false;
+                    
+                    if read_idx < ranges.len() - 1 {
+                        let next_start = ranges[read_idx + 1].start;
+                        
+                        // Check if current range is significantly overlapped by both neighbors
+                        if curr_start > prev_start && next_start < curr_end {
+                            let overlap_with_prev = prev_end - curr_start;
+                            let overlap_with_next = curr_end - next_start;
+                            let range_length = curr_end - curr_start;
+                            
+                            // Skip if the range is mostly covered by its neighbors
+                            if overlap_with_prev + overlap_with_next > range_length {
+                                should_skip = true;
+                            }
+                        }
+                    }
+                    
+                    if !should_skip {
+                        write_idx += 1;
+                        if write_idx != read_idx {
+                            ranges.swap(write_idx, read_idx);
+                        }
+                    }
+                } else {
+                    // No overlap - keep both ranges
+                    write_idx += 1;
+                    if write_idx != read_idx {
+                        ranges.swap(write_idx, read_idx);
+                    }
                 }
             }
-        }
-        
-        if !should_skip {
-            write_idx += 1;
-            if write_idx != read_idx {
-                ranges.swap(write_idx, read_idx);
-            }
-        }
-    } else {
-        // No overlap - keep both ranges
-        write_idx += 1;
-        if write_idx != read_idx {
-            ranges.swap(write_idx, read_idx);
-        }
-    }
-}
-ranges.truncate(write_idx + 1);
+            ranges.truncate(write_idx + 1);
 
             // Create expected ranges
             let expected: Vec<RangeInfo> = expected_ranges
