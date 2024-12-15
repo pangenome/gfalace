@@ -145,7 +145,7 @@ fn process_gfa_files(
                     // Record the end position of this step
                     let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
                     let node_length = node_seq.len();
-                    cumulative_pos = cumulative_pos + node_length;
+                    cumulative_pos += node_length;
                     step_ends.push(cumulative_pos);
                 }
 
@@ -168,7 +168,7 @@ fn process_gfa_files(
 
     if debug {
         eprintln!("Collected {} nodes, {} edges, {} paths, and {} path ranges from all GFA files",
-            combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len(), path_key_ranges.iter().map(|(_, ranges)| ranges.len()).sum::<usize>());
+            combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len(), path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
     }
 
     (combined_graph, path_key_ranges)
@@ -251,7 +251,7 @@ fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
 }
 
 fn sort_and_filter_ranges(
-    path_key: &String,
+    path_key: &str,
     ranges: &mut Vec<RangeInfo>,
     debug: bool
 ) {
@@ -352,8 +352,8 @@ fn sort_and_filter_ranges(
 }
 
 fn trim_range_overlaps(
-    path_key: &String,
-    ranges: &mut Vec<RangeInfo>, 
+    path_key: &str,
+    ranges: &mut [RangeInfo],
     combined_graph: &mut HashGraph,
     debug: bool
 ) {
@@ -369,7 +369,7 @@ fn trim_range_overlaps(
         let r1 = &mut left[left.len()-1];
         let r2 = &mut right[0];
 
-        if r1.overlaps_with(&r2) {
+        if r1.overlaps_with(r2) {
             // Calculate the overlap region - use max/min to get precise overlap bounds
             let overlap_start = std::cmp::max(r1.start, r2.start);
             let overlap_end = std::cmp::min(r1.end, r2.end);
@@ -547,14 +547,14 @@ fn create_paths_from_ranges(
         let r1 = &window[0];
         let r2 = &window[1];
 
-        if r1.overlaps_with(&r2) {
+        if r1.overlaps_with(r2) {
             if debug {
                 eprintln!("Unresolved overlaps detected between ranges: [start={}, end={}] and [start={}, end={}]", 
                 r1.start, r1.end, r2.start, r2.end);
             }
             panic!("Unresolved overlaps detected in path key '{}'", path_key);
         }
-        if !r1.is_contiguous_with(&r2) {
+        if !r1.is_contiguous_with(r2) {
             all_contiguous = false;
         }
     }
