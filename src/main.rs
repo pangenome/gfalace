@@ -51,22 +51,23 @@ fn main() {
     // Create a single combined graph without paths and a map of path key to ranges
     let (mut combined_graph, mut path_key_ranges) = process_gfa_files(&args.gfa_list);
 
-    // Sort ranges and create merged paths in the combined graph
+    // Sort, deduplicate, and trim path ranges and create merged paths in the combined graph
+    info!("Processing {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
     for (path_key, ranges) in path_key_ranges.iter_mut() {
-        info!("Processing path key '{}' with {} ranges", path_key, ranges.len());
+        debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
+        
         sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
         trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
         create_paths_from_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
-    info!("Total paths created: {}", GraphPaths::path_count(&combined_graph));
+    info!("Created {} nodes, {} edges, and {} paths in the combined graph",
+        combined_graph.node_count(), combined_graph.edge_count(), combined_graph.path_count());
 
-    info!("Total nodes before filtering: {}", combined_graph.node_count());
+    info!("Marking unused nodes for removal");
+    let nodes_to_skip = mark_nodes_for_removal(&combined_graph);    
+    info!("Total unused nodes to remove: {}", nodes_to_skip.count_ones());
     
-    let nodes_to_skip = mark_nodes_for_removal(&combined_graph);
-    
-    info!("Total nodes to be filtered out: {}", nodes_to_skip.count_ones());
-    
-    // Write the combined graph to GFA file, skipping unused nodes
+    info!("Writing the combined graph by removing unused nodes and compacting node IDs");
     match write_graph_to_gfa(&combined_graph, &args.output, &nodes_to_skip) {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
@@ -171,8 +172,8 @@ fn process_gfa_files(
         }
     }
 
-    info!("Collected {} nodes, {} edges, {} paths, and {} path ranges from all GFA files",
-            combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len(), path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
+    info!("Collected {} nodes, {} edges, and {} path keys",
+        combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len());
 
     (combined_graph, path_key_ranges)
 }
