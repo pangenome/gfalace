@@ -20,6 +20,24 @@ use bitvec::{bitvec, prelude::BitVec};
 use tempfile::NamedTempFile;
 use log::{debug, info, warn, error};
 
+use std::process::Command;
+
+#[cfg(not(debug_assertions))]
+fn log_memory_usage(stage: &str) {
+    let output = Command::new("ps")
+        .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("Failed to execute ps command");
+    
+    let memory_kb = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+    
+    let memory_mb = memory_kb as f64 / 1024.0;
+    info!("Memory usage at {}: {:.2} MB", stage, memory_mb);
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
@@ -48,8 +66,15 @@ fn main() {
     })
     .init();
 
+    log_memory_usage("start");
+
     // Create a single combined graph without paths and a map of path key to ranges
     let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list);
+
+    log_memory_usage("after_reading_files");
+
+    let total_path_keys = path_key_ranges.len();
+    let mut processed_path_keys = 0;
 
     // Sort, deduplicate, and trim path ranges and create merged paths in the combined graph
     info!("Sorting, deduplicating, and trimming {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
@@ -59,9 +84,17 @@ fn main() {
         sort_and_filter_ranges(&path_key, &mut ranges, args.verbose > 1);
         trim_range_overlaps(&path_key, &mut ranges, &mut combined_graph, args.verbose > 1);
         create_paths_from_ranges(&path_key, &ranges, &mut combined_graph, args.verbose > 1);
+
+        processed_path_keys += 1;
+        if processed_path_keys % 10 == 0 {
+            info!("Processed {}/{} path keys", processed_path_keys, total_path_keys);
+            log_memory_usage(&format!("Processed {} path keys", processed_path_keys));
+        }
     }
     info!("Created {} nodes, {} edges, and {} paths",
         combined_graph.node_count(), combined_graph.edge_count(), combined_graph.path_count());
+
+    log_memory_usage("before_writing");
 
     info!("Writing the result by removing unused nodes/edges and compacting node IDs");
     match write_graph_to_gfa(&combined_graph, &args.output) {
@@ -69,6 +102,7 @@ fn main() {
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
 
+    log_memory_usage("end");
 }
 
 #[derive(Debug, Clone)]
@@ -675,42 +709,35 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<(
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
     
-    // Collect nodes, excluding marked nodes
-    let nodes: Vec<Handle> = graph.handles()
-        .filter(|handle| !nodes_to_remove[u64::from(handle.id()) as usize])
-        .collect();
-    
-    // Create mapping from old IDs to new sequential IDs
-    // We allocate a vector with capacity for the max node ID + 1
+
+    // Write nodes by exluding marked ones and create the id_mapping
     let max_id = graph.node_count();
     let mut id_mapping = vec![0; max_id + 1];
-    for (new_id, handle) in nodes.iter().enumerate() {
-        id_mapping[u64::from(handle.id()) as usize] = new_id + 1; // +1 to start from 1
+    let mut new_id = 1; // Start from 1
+    for handle in graph.handles() {
+        let node_id = usize::from(handle.id());
+        if !nodes_to_remove[node_id] {
+            id_mapping[node_id] = new_id;
+            
+            let sequence = graph.sequence(handle).collect::<Vec<_>>();
+            let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| String::from("N"));
+            writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
+            
+            new_id += 1;
+        }
     }
     
-    // Write nodes with new IDs
-    for handle in &nodes {
-        let sequence = graph.sequence(*handle).collect::<Vec<_>>();
-        let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| String::from("N"));
-        let node_id = id_mapping[u64::from(handle.id()) as usize];
-        writeln!(file, "S\t{}\t{}", node_id, sequence_str)?;
-    }
-    
-    // Collect and sort edges, excluding those connected to marked nodes
-    let edges: Vec<Edge> = graph.edges()
-        .filter(|edge| {
-            !nodes_to_remove[u64::from(edge.0.id()) as usize] && 
-            !nodes_to_remove[u64::from(edge.1.id()) as usize]
-        })
-        .collect();
-    
-    // Write edges with new IDs
-    for edge in edges {
-        let from_id = id_mapping[u64::from(edge.0.id()) as usize];
-        let to_id = id_mapping[u64::from(edge.1.id()) as usize];
-        let from_orient = if edge.0.is_reverse() { "-" } else { "+" };
-        let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
-        writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
+    // Write edges by excluding those connected to marked nodes
+    for edge in graph.edges() {
+        if !nodes_to_remove[u64::from(edge.0.id()) as usize] && 
+           !nodes_to_remove[u64::from(edge.1.id()) as usize] 
+        {
+            let from_id = id_mapping[u64::from(edge.0.id()) as usize];
+            let to_id = id_mapping[u64::from(edge.1.id()) as usize];
+            let from_orient = if edge.0.is_reverse() { "-" } else { "+" };
+            let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
+            writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
+        }
     }
 
     // Collect and sort paths directly with references to avoid multiple lookups
