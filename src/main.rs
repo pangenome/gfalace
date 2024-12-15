@@ -53,12 +53,12 @@ fn main() {
 
     // Sort, deduplicate, and trim path ranges and create merged paths in the combined graph
     info!("Sorting, deduplicating, and trimming {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
-    for (path_key, ranges) in path_key_ranges.iter_mut() {
+    for (path_key, mut ranges) in path_key_ranges.drain() {
         debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
-        
-        sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
-        trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
-        create_paths_from_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
+
+        sort_and_filter_ranges(&path_key, &mut ranges, args.verbose > 1);
+        trim_range_overlaps(&path_key, &mut ranges, &mut combined_graph, args.verbose > 1);
+        create_paths_from_ranges(&path_key, &ranges, &mut combined_graph, args.verbose > 1);
     }
     info!("Created {} nodes, {} edges, and {} paths",
         combined_graph.node_count(), combined_graph.edge_count(), combined_graph.path_count());
@@ -68,6 +68,7 @@ fn main() {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
+
 }
 
 #[derive(Debug, Clone)]
@@ -446,7 +447,7 @@ fn trim_range_overlaps(
                     if debug {
                         debug!("    Splitting step {} [start={}, end={}, len={}] to remove overlap at [start={}, end={}]", 
                             idx, step_start, step_end, step_end - step_start, overlap_within_step_start, overlap_within_step_end);
-                            debug!("    Overlap offsets: start={}, end={}", overlap_start_offset, overlap_end_offset);
+                        debug!("    Overlap offsets: start={}, end={}", overlap_start_offset, overlap_end_offset);
                     }
 
                     if step_start < overlap_start {
