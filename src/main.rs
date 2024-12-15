@@ -9,10 +9,7 @@ use handlegraph::{
     handle::{Handle, NodeId, Edge},
     handlegraph::*,
     mutablehandlegraph::*,
-    pathhandlegraph::{
-        MutableGraphPaths,
-        GraphPaths
-    },
+    pathhandlegraph::GraphPaths,
     hashgraph::HashGraph,
 };
 use gfa::{gfa::GFA, parser::GFAParser};
@@ -20,23 +17,23 @@ use bitvec::{bitvec, prelude::BitVec};
 use tempfile::NamedTempFile;
 use log::{debug, info, warn, error};
 
-use std::process::Command;
+// use std::process::Command;
 
-#[cfg(not(debug_assertions))]
-fn log_memory_usage(stage: &str) {
-    let output = Command::new("ps")
-        .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .expect("Failed to execute ps command");
+// #[cfg(not(debug_assertions))]
+// fn log_memory_usage(stage: &str) {
+//     let output = Command::new("ps")
+//         .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
+//         .output()
+//         .expect("Failed to execute ps command");
     
-    let memory_kb = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(0);
+//     let memory_kb = String::from_utf8_lossy(&output.stdout)
+//         .trim()
+//         .parse::<u64>()
+//         .unwrap_or(0);
     
-    let memory_mb = memory_kb as f64 / 1024.0;
-    info!("Memory usage at {}: {:.2} MB", stage, memory_mb);
-}
+//     let memory_mb = memory_kb as f64 / 1024.0;
+//     info!("Memory usage at {}: {:.2} MB", stage, memory_mb);
+// }
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
@@ -66,43 +63,34 @@ fn main() {
     })
     .init();
 
-    log_memory_usage("start");
+    // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
     let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list);
 
-    log_memory_usage("after_reading_files");
+    // log_memory_usage("after_reading_files");
 
-    let total_path_keys = path_key_ranges.len();
-    let mut processed_path_keys = 0;
-
-    // Sort, deduplicate, and trim path ranges and create merged paths in the combined graph
+    // Sort, deduplicate, trim, and link path ranges
     info!("Sorting, deduplicating, and trimming {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
-    for (path_key, mut ranges) in path_key_ranges.drain() {
+    for (path_key, ranges) in path_key_ranges.iter_mut() {
         debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
 
-        sort_and_filter_ranges(&path_key, &mut ranges, args.verbose > 1);
-        trim_range_overlaps(&path_key, &mut ranges, &mut combined_graph, args.verbose > 1);
-        create_paths_from_ranges(&path_key, &ranges, &mut combined_graph, args.verbose > 1);
-
-        processed_path_keys += 1;
-        if processed_path_keys % 10 == 0 {
-            info!("Processed {}/{} path keys", processed_path_keys, total_path_keys);
-            log_memory_usage(&format!("Processed {} path keys", processed_path_keys));
-        }
+        sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
+        trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
+        link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
     info!("Created {} nodes, {} edges, and {} paths",
         combined_graph.node_count(), combined_graph.edge_count(), combined_graph.path_count());
 
-    log_memory_usage("before_writing");
+    // log_memory_usage("before_writing");
 
-    info!("Writing the result by removing unused nodes/edges and compacting node IDs");
-    match write_graph_to_gfa(&combined_graph, &args.output) {
+    info!("Writing the result by adding paths, removing unused nodes/edges, and compacting node IDs");
+    match write_graph_to_gfa(&combined_graph, &path_key_ranges, &args.output, args.verbose > 1) {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
 
-    log_memory_usage("end");
+    // log_memory_usage("end");
 }
 
 #[derive(Debug, Clone)]
@@ -393,9 +381,7 @@ fn trim_range_overlaps(
     debug: bool
 ) {
     // Trim overlaps
-    if debug {
-        debug!("Trimming overlapping ranges");
-    }
+    debug!("Trimming overlapping ranges");
 
     let mut next_node_id_value = u64::from(combined_graph.max_node_id()) + 1;
 
@@ -409,12 +395,10 @@ fn trim_range_overlaps(
             let overlap_start = std::cmp::max(r1.start, r2.start);
             let overlap_end = std::cmp::min(r1.end, r2.end);
 
-            if debug {
-                debug!(
-                    "  Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
-                    r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_end - overlap_start
-                );
-            }
+            debug!(
+                "  Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
+                r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_end - overlap_start
+            );
 
             // Adjust r2 to remove the overlap
             let mut steps_to_remove = Vec::new();
@@ -478,16 +462,11 @@ fn trim_range_overlaps(
                     let overlap_start_offset = (overlap_within_step_start - step_start).min(node_len);
                     let overlap_end_offset = (overlap_within_step_end - step_start).min(node_len);
 
-                    if debug {
-                        debug!("    Splitting step {} [start={}, end={}, len={}] to remove overlap at [start={}, end={}]", 
-                            idx, step_start, step_end, step_end - step_start, overlap_within_step_start, overlap_within_step_end);
-                        debug!("    Overlap offsets: start={}, end={}", overlap_start_offset, overlap_end_offset);
-                    }
+                    debug!("    Splitting step {} [start={}, end={}, len={}] to remove overlap at [start={}, end={}]\n    Overlap offsets: start={}, end={}",
+                        idx, step_start, step_end, step_end - step_start, overlap_within_step_start, overlap_within_step_end, overlap_start_offset, overlap_end_offset);
 
                     if step_start < overlap_start {
-                        if debug {
-                            debug!("    Adding left part of step [start={}, end={}]", step_start, overlap_within_step_start);
-                        }
+                        debug!("    Adding left part of step [start={}, end={}]", step_start, overlap_within_step_start);
                         assert!(overlap_start_offset > 0);
 
                         // Keep left part
@@ -503,9 +482,7 @@ fn trim_range_overlaps(
                             range_new_start = Some(step_start);
                         }
                     } else if step_end > overlap_end {
-                        if debug {
-                            debug!("    Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
-                        }
+                        debug!("    Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
                         assert!(overlap_end_offset < node_len);
 
                         // Keep right part
@@ -555,8 +532,41 @@ fn trim_range_overlaps(
                 r2.end = overlap_end;
             }
 
-            if debug {
-                debug!("    Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
+            debug!("    Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
+        }
+    }
+
+    if debug {
+        debug!("Path key '{}' without overlaps", path_key);
+        for range in ranges.iter() {
+            debug!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+        }
+    }
+}
+
+fn link_contiguous_ranges(
+    path_key: &str,
+    ranges: &mut [RangeInfo],
+    combined_graph: &mut HashGraph,
+    debug: bool
+) {
+    // Trim overlaps
+    debug!("Linking overlapping ranges");
+
+    for i in 1..ranges.len() {
+        let (left, right) = ranges.split_at_mut(i);
+        let r1 = &mut left[left.len()-1];
+        let r2 = &mut right[0];
+
+        // Check if ranges are contiguous
+        if r1.is_contiguous_with(r2) {
+            // Get last handle from previous range and first handle from current range
+            if let (Some(&last_handle), Some(&first_handle)) = (r1.steps.last(), r2.steps.first()) {
+                // Create edge if it doesn't exist
+                if !combined_graph.has_edge(last_handle, first_handle) {
+                    combined_graph.create_edge(Edge(last_handle, first_handle));
+                    debug!("  Created edge between contiguous ranges at position {}", r1.end);
+                }
             }
         }
     }
@@ -569,139 +579,149 @@ fn trim_range_overlaps(
     }
 }
 
-fn create_paths_from_ranges(
-    path_key: &str,
-    ranges: &[RangeInfo],
-    combined_graph: &mut HashGraph,
-    debug: bool
-) {
-    // Check for overlaps and contiguity
-    let mut all_contiguous = true;
+// fn create_paths_from_ranges(
+//     path_key: &str,
+//     ranges: &[RangeInfo],
+//     combined_graph: &mut HashGraph,
+//     debug: bool
+// ) {
+//     // Check for overlaps and contiguity
+//     let mut all_contiguous = true;
     
-    for window in ranges.windows(2) {
-        let r1 = &window[0];
-        let r2 = &window[1];
+//     for window in ranges.windows(2) {
+//         let r1 = &window[0];
+//         let r2 = &window[1];
 
-        if r1.overlaps_with(r2) {
-            if debug {
-                debug!("Unresolved overlaps detected between ranges: [start={}, end={}] and [start={}, end={}]", 
-                r1.start, r1.end, r2.start, r2.end);
-            }
-            panic!("Unresolved overlaps detected in path key '{}'", path_key);
-        }
-        if !r1.is_contiguous_with(r2) {
-            all_contiguous = false;
-        }
-    }
+//         if r1.overlaps_with(r2) {
+//             if debug {
+//                 debug!("Unresolved overlaps detected between ranges: [start={}, end={}] and [start={}, end={}]", 
+//                 r1.start, r1.end, r2.start, r2.end);
+//             }
+//             panic!("Unresolved overlaps detected in path key '{}'", path_key);
+//         }
+//         if !r1.is_contiguous_with(r2) {
+//             all_contiguous = false;
+//         }
+//     }
             
-    if !all_contiguous && debug {
-        let mut current_start = ranges[0].start;
-        let mut current_end = ranges[0].end;
+//     if !all_contiguous && debug {
+//         let mut current_start = ranges[0].start;
+//         let mut current_end = ranges[0].end;
         
-        for i in 1..ranges.len() {
-            if ranges[i-1].is_contiguous_with(&ranges[i]) {
-                // Extend current merged range
-                current_end = ranges[i].end;
-            } else {
-                // Print current merged range
-                debug!("    Merged range: start={}, end={}", 
-                    current_start, current_end);
+//         for i in 1..ranges.len() {
+//             if ranges[i-1].is_contiguous_with(&ranges[i]) {
+//                 // Extend current merged range
+//                 current_end = ranges[i].end;
+//             } else {
+//                 // Print current merged range
+//                 debug!("    Merged range: start={}, end={}", 
+//                     current_start, current_end);
                 
-                if !ranges[i-1].overlaps_with(&ranges[i]) {
-                    // Calculate and print gap
-                    let gap = ranges[i].start - current_end;
-                    debug!("      Gap to next range: {} positions", gap);
-                } else {
-                    // Calculate and print overlap
-                    let overlap = current_end - ranges[i].start;
-                    debug!("      Overlap with next range: {} positions", overlap);
-                }
+//                 if !ranges[i-1].overlaps_with(&ranges[i]) {
+//                     // Calculate and print gap
+//                     let gap = ranges[i].start - current_end;
+//                     debug!("      Gap to next range: {} positions", gap);
+//                 } else {
+//                     // Calculate and print overlap
+//                     let overlap = current_end - ranges[i].start;
+//                     debug!("      Overlap with next range: {} positions", overlap);
+//                 }
 
-                // Start new merged range
-                current_start = ranges[i].start;
-                current_end = ranges[i].end;
-            }
-        }
+//                 // Start new merged range
+//                 current_start = ranges[i].start;
+//                 current_end = ranges[i].end;
+//             }
+//         }
         
-        // Print final merged range
-        debug!("    Merged range: start={}, end={}", 
-            current_start, current_end);
-    }
+//         // Print final merged range
+//         debug!("    Merged range: start={}, end={}", 
+//             current_start, current_end);
+//     }
 
-    if all_contiguous {
-        // Create a single path with the original key
-        let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
-        let mut prev_step = None;
+//     if all_contiguous {
+//         // Create a single path with the original key
+//         let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
+//         let mut prev_step = None;
         
-        // Add all steps from all ranges
-        for range in ranges.iter() {
-            for step in &range.steps {
-                combined_graph.path_append_step(path_id, *step);
+//         // Add all steps from all ranges
+//         for range in ranges.iter() {
+//             for step in &range.steps {
+//                 combined_graph.path_append_step(path_id, *step);
                 
-                if let Some(prev) = prev_step {
-                    if !combined_graph.has_edge(prev, *step) {
-                        combined_graph.create_edge(Edge(prev, *step));
-                    }
-                }
-                prev_step = Some(*step);
-            }
-        }
-    } else {
-        // Handle non-contiguous ranges by creating separate paths for each contiguous group
-        let mut current_range_idx = 0;
-        while current_range_idx < ranges.len() {
-            let start_range = &ranges[current_range_idx];
-            let mut steps = start_range.steps.clone();
-            let mut next_idx = current_range_idx + 1;
-            let mut end_range = start_range;
+//                 if let Some(prev) = prev_step {
+//                     if !combined_graph.has_edge(prev, *step) {
+//                         combined_graph.create_edge(Edge(prev, *step));
+//                     }
+//                 }
+//                 prev_step = Some(*step);
+//             }
+//         }
+//     } else {
+//         // Handle non-contiguous ranges by creating separate paths for each contiguous group
+//         let mut current_range_idx = 0;
+//         while current_range_idx < ranges.len() {
+//             let start_range = &ranges[current_range_idx];
+//             let mut steps = start_range.steps.clone();
+//             let mut next_idx = current_range_idx + 1;
+//             let mut end_range = start_range;
             
-            // Merge contiguous ranges
-            while next_idx < ranges.len() && ranges[next_idx - 1].is_contiguous_with(&ranges[next_idx]) {
-                steps.extend(ranges[next_idx].steps.clone());
-                end_range = &ranges[next_idx];
-                next_idx += 1;
-            }
+//             // Merge contiguous ranges
+//             while next_idx < ranges.len() && ranges[next_idx - 1].is_contiguous_with(&ranges[next_idx]) {
+//                 steps.extend(ranges[next_idx].steps.clone());
+//                 end_range = &ranges[next_idx];
+//                 next_idx += 1;
+//             }
             
-            // Create path name with range information
-            let path_name = format!("{}:{}-{}", path_key, start_range.start, end_range.end);
-            let path_id = combined_graph.create_path(path_name.as_bytes(), false).unwrap();
+//             // Create path name with range information
+//             let path_name = format!("{}:{}-{}", path_key, start_range.start, end_range.end);
+//             let path_id = combined_graph.create_path(path_name.as_bytes(), false).unwrap();
             
-            // Add steps to the path
-            let mut prev_step = None;
-            for step in steps {
-                combined_graph.path_append_step(path_id, step);
+//             // Add steps to the path
+//             let mut prev_step = None;
+//             for step in steps {
+//                 combined_graph.path_append_step(path_id, step);
                 
-                if let Some(prev) = prev_step {
-                    if !combined_graph.has_edge(prev, step) {
-                        combined_graph.create_edge(Edge(prev, step));
-                    }
-                }
-                prev_step = Some(step);
-            }
+//                 if let Some(prev) = prev_step {
+//                     if !combined_graph.has_edge(prev, step) {
+//                         combined_graph.create_edge(Edge(prev, step));
+//                     }
+//                 }
+//                 prev_step = Some(step);
+//             }
             
-            current_range_idx = next_idx;
-        }
-    }
-}
+//             current_range_idx = next_idx;
+//         }
+//     }
+// }
 
-fn mark_nodes_for_removal(graph: &HashGraph) -> BitVec {
+fn mark_nodes_for_removal(
+    graph: &HashGraph,
+    path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>
+) -> BitVec {
     // Create a bitvector with all nodes initially marked for removal
     let max_node_id = u64::from(graph.max_node_id());
     let mut nodes_to_remove = bitvec![1; max_node_id as usize + 1];
     
-    // Mark nodes used in paths as not to be removed (set bit to 0)
-    for (_path_id, path_ref) in graph.paths.iter() {
-        for handle in &path_ref.nodes {
-            nodes_to_remove.set(u64::from(handle.id()) as usize, false);
+    // Mark nodes used in path ranges as not to be removed (set bit to 0)
+    for ranges in path_key_ranges.values() {
+        for range in ranges {
+            for handle in &range.steps {
+                nodes_to_remove.set(u64::from(handle.id()) as usize, false);
+            }
         }
     }
     
     nodes_to_remove
 }
 
-fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
+fn write_graph_to_gfa(
+    graph: &HashGraph, 
+    path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
+    output_path: &str,
+    debug: bool
+) -> std::io::Result<()> {
     debug!("Marking unused nodes for removal");
-    let nodes_to_remove : BitVec = mark_nodes_for_removal(&graph);    
+    let nodes_to_remove : BitVec = mark_nodes_for_removal(&graph, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
     let mut file = File::create(output_path)?;
@@ -709,7 +729,6 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<(
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
     
-
     // Write nodes by exluding marked ones and create the id_mapping
     let max_id = graph.node_count();
     let mut id_mapping = vec![0; max_id + 1];
@@ -740,28 +759,99 @@ fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<(
         }
     }
 
-    // Collect and sort paths directly with references to avoid multiple lookups
-    let mut path_entries: Vec<_> = graph.paths.iter().collect();
-    path_entries.sort_by_key(|(_, path_ref)| {
-        // Get name directly from path struct instead of doing lookups
-        path_ref.name.as_slice()
-    });
+    // Write paths by processing ranges directly
+    let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
+    path_key_vec.sort(); // Sort path keys for consistent output
 
-    // Write paths with new IDs
-    for (_path_id, path_ref) in path_entries {
-        // Pre-allocate vector with capacity
-        let mut path_elements = Vec::with_capacity(path_ref.nodes.len());
+    for path_key in path_key_vec {
+        let ranges = &path_key_ranges[path_key];
+
+        // Check for overlaps and contiguity
+        let mut all_contiguous = true;
         
-        // Process nodes directly from path reference
-        for handle in &path_ref.nodes {
-            let node_id = id_mapping[u64::from(handle.id()) as usize];
-            let orient = if handle.is_reverse() { "-" } else { "+" };
-            path_elements.push(format!("{}{}", node_id, orient));
+        for window in ranges.windows(2) {
+            let r1 = &window[0];
+            let r2 = &window[1];
+
+            if r1.overlaps_with(r2) {
+                panic!("Unresolved overlaps detected in path key '{}': [start={}, end={}] and [start={}, end={}]", path_key, 
+                r1.start, r1.end, r2.start, r2.end);
+            }
+            if !r1.is_contiguous_with(r2) {
+                all_contiguous = false;
+            }
         }
-        
-        if !path_elements.is_empty() {
-            let path_name = String::from_utf8_lossy(&path_ref.name);
-            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+
+        if !all_contiguous && debug {
+            let mut current_start = ranges[0].start;
+            let mut current_end = ranges[0].end;
+            
+            for i in 1..ranges.len() {
+                if ranges[i-1].is_contiguous_with(&ranges[i]) {
+                    // Extend current merged range
+                    current_end = ranges[i].end;
+                } else {
+                    // Print current merged range
+                    debug!("    Merged range: start={}, end={}", 
+                        current_start, current_end);
+                    
+                    if !ranges[i-1].overlaps_with(&ranges[i]) {
+                        // Calculate and print gap
+                        let gap = ranges[i].start - current_end;
+                        debug!("      Gap to next range: {} positions", gap);
+                    } else {
+                        // Calculate and print overlap
+                        let overlap = current_end - ranges[i].start;
+                        debug!("      Overlap with next range: {} positions", overlap);
+                    }
+    
+                    // Start new merged range
+                    current_start = ranges[i].start;
+                    current_end = ranges[i].end;
+                }
+            }
+            
+            // Print final merged range
+            debug!("    Merged range: start={}, end={}", 
+                current_start, current_end);
+        }
+
+        let mut current_range_idx = 0;
+
+        while current_range_idx < ranges.len() {
+            let start_range = &ranges[current_range_idx];
+            let mut next_idx = current_range_idx + 1;
+            let mut end_range = start_range;
+            
+            // Find contiguous ranges
+            while next_idx < ranges.len() && ranges[next_idx - 1].is_contiguous_with(&ranges[next_idx]) {
+                end_range = &ranges[next_idx];
+                next_idx += 1;
+            }
+
+            // Create path elements for contiguous range group
+            let mut path_elements = Vec::new();
+            for idx in current_range_idx..next_idx {
+                for handle in &ranges[idx].steps {
+                    let node_id = id_mapping[u64::from(handle.id()) as usize];
+                    let orient = if handle.is_reverse() { "-" } else { "+" };
+                    path_elements.push(format!("{}{}", node_id, orient));
+                }
+            }
+
+            if !path_elements.is_empty() {
+                let path_name = if next_idx - current_range_idx == ranges.len() {
+                    // All ranges are contiguous - use original path key
+                    path_key.to_string()
+                } else {
+                    // Create path name with range information
+                    format!("{}:{}-{}", path_key, start_range.start, end_range.end)
+                };
+                
+                writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+            }
+            
+            current_range_idx = next_idx;
         }
     }
         
