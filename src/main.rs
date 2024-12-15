@@ -71,7 +71,7 @@ fn main() {
     // log_memory_usage("after_reading_files");
 
     // Sort, deduplicate, trim, and link path ranges
-    info!("Sorting, deduplicating, and trimming {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
+    info!("Sorting, deduplicating, trimming, and linking {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
     for (path_key, ranges) in path_key_ranges.iter_mut() {
         debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
 
