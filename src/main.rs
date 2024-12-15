@@ -49,10 +49,10 @@ fn main() {
     .init();
 
     // Create a single combined graph without paths and a map of path key to ranges
-    let (mut combined_graph, mut path_key_ranges) = process_gfa_files(&args.gfa_list);
+    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list);
 
     // Sort, deduplicate, and trim path ranges and create merged paths in the combined graph
-    info!("Processing {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
+    info!("Sorting, deduplicating, and trimming {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
     for (path_key, ranges) in path_key_ranges.iter_mut() {
         debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
         
@@ -60,15 +60,11 @@ fn main() {
         trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
         create_paths_from_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
-    info!("Created {} nodes, {} edges, and {} paths in the combined graph",
+    info!("Created {} nodes, {} edges, and {} paths",
         combined_graph.node_count(), combined_graph.edge_count(), combined_graph.path_count());
 
-    info!("Marking unused nodes for removal");
-    let nodes_to_skip = mark_nodes_for_removal(&combined_graph);    
-    info!("Total unused nodes to remove: {}", nodes_to_skip.count_ones());
-    
-    info!("Writing the combined graph by removing unused nodes and compacting node IDs");
-    match write_graph_to_gfa(&combined_graph, &args.output, &nodes_to_skip) {
+    info!("Writing the result by removing unused nodes/edges and compacting node IDs");
+    match write_graph_to_gfa(&combined_graph, &args.output) {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
@@ -96,14 +92,14 @@ impl RangeInfo {
     }
 }
 
-fn process_gfa_files(
+fn read_gfa_files(
     gfa_list: &[String],
 ) -> (HashGraph, FxHashMap<String, Vec<RangeInfo>>) {
     let mut combined_graph = HashGraph::new();
     let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
     let mut id_translations = Vec::new();
 
-    info!("Processing {} GFA files", gfa_list.len());
+    info!("Reading {} GFA files", gfa_list.len());
 
     // Process each GFA file
     let parser = GFAParser::new();
@@ -668,7 +664,11 @@ fn mark_nodes_for_removal(graph: &HashGraph) -> BitVec {
     nodes_to_remove
 }
 
-fn write_graph_to_gfa(graph: &HashGraph, output_path: &str, nodes_to_remove: &BitVec) -> std::io::Result<()> {
+fn write_graph_to_gfa(graph: &HashGraph, output_path: &str) -> std::io::Result<()> {
+    debug!("Marking unused nodes for removal");
+    let nodes_to_remove : BitVec = mark_nodes_for_removal(&graph);    
+    debug!("Marked {} nodes", nodes_to_remove.count_ones());
+    
     let mut file = File::create(output_path)?;
     
     // Write GFA version
