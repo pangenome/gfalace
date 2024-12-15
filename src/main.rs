@@ -84,7 +84,6 @@ fn main() {
 
     // log_memory_usage("before_writing");
 
-    info!("Writing the result by adding paths, removing unused nodes/edges, and compacting node IDs");
     match write_graph_to_gfa(&combined_graph, &path_key_ranges, &args.output, args.verbose > 1) {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
@@ -720,7 +719,7 @@ fn write_graph_to_gfa(
     output_path: &str,
     debug: bool
 ) -> std::io::Result<()> {
-    debug!("Marking unused nodes for removal");
+    info!("Marking unused nodes");
     let nodes_to_remove : BitVec = mark_nodes_for_removal(&graph, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
@@ -730,6 +729,7 @@ fn write_graph_to_gfa(
     writeln!(file, "H\tVN:Z:1.0")?;
     
     // Write nodes by exluding marked ones and create the id_mapping
+    info!("Writing used nodes by compacting their IDs");
     let max_id = graph.node_count();
     let mut id_mapping = vec![0; max_id + 1];
     let mut new_id = 1; // Start from 1
@@ -747,6 +747,7 @@ fn write_graph_to_gfa(
     }
     
     // Write edges by excluding those connected to marked nodes
+    info!("Writing edges connecting used nodes");
     for edge in graph.edges() {
         if !nodes_to_remove[u64::from(edge.0.id()) as usize] && 
            !nodes_to_remove[u64::from(edge.1.id()) as usize] 
@@ -760,6 +761,7 @@ fn write_graph_to_gfa(
     }
 
     // Write paths by processing ranges directly
+    info!("Writing paths by merging contiguous path ranges");
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
     path_key_vec.sort(); // Sort path keys for consistent output
 
