@@ -46,9 +46,9 @@ struct Args {
     #[clap(short, long, value_parser)]
     output: String,
 
-    /// Fill gaps between path ranges (with N's if no FASTA provided)
-    #[clap(long)]
-    fill_gaps: bool,
+    /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --fasta for end gaps)
+    #[clap(long, default_value = "0")]
+    fill_gaps: u8,
 
     /// FASTA file containing sequences for gap filling
     #[clap(long)]
@@ -734,7 +734,7 @@ fn write_graph_to_gfa(
     graph: &HashGraph, 
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
     output_path: &str,
-    fill_gaps: bool,
+    fill_gaps: u8,
     fasta_reader: &Option<faidx::Reader>,
     debug: bool
 ) -> std::io::Result<()> {
@@ -784,7 +784,14 @@ fn write_graph_to_gfa(
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
     path_key_vec.sort(); // Sort path keys for consistent output
 
-    let last_new_id = new_id;
+    let mut start_gaps = 0;
+    let mut middle_gaps = 0;
+    let mut end_gaps = 0;
+
+    // Check if a valid FASTA reader is provided for end gap filling
+    if fill_gaps == 2 && fasta_reader.is_none() {
+        warn!("Cannot fill end gaps without FASTA file");
+    }
 
     for path_key in path_key_vec {
         let ranges = &path_key_ranges[path_key];
@@ -834,7 +841,9 @@ fn write_graph_to_gfa(
             let mut path_elements = Vec::new();
 
             // Handle initial gap if it exists and gap filling is enabled
-            if fill_gaps && start_range.start > 0 {
+            if fill_gaps == 2 && start_range.start > 0 {
+                start_gaps += 1;
+
                 let gap_element = create_gap_node(
                     &mut file,
                     0,
@@ -861,7 +870,9 @@ fn write_graph_to_gfa(
                     add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
                     end_range = next_range;
                     next_idx += 1;
-                } else if fill_gaps {
+                } else if fill_gaps > 0 {
+                    middle_gaps += 1;
+
                     // Fill gap between ranges
                     let gap_element = create_gap_node(
                         &mut file,
@@ -887,10 +898,12 @@ fn write_graph_to_gfa(
             }
 
             // Handle final gap if sequence length is known and gap filling is enabled
-            if fill_gaps {
+            if fill_gaps == 2 {
                 // Get sequence length if FASTA is provided
                 if let Some(total_length) = fasta_reader.as_ref().map(|reader| reader.fetch_seq_len(path_key) as usize) {
                     if end_range.end < total_length {
+                        end_gaps += 1;
+
                         let gap_element = create_gap_node(
                             &mut file,
                             end_range.end,
@@ -927,8 +940,14 @@ fn write_graph_to_gfa(
         }
     }
 
-    if fill_gaps {
-        info!("Filled {} gaps", new_id - last_new_id);
+    if fill_gaps == 2 {
+        info!("Filled {} gaps: {} start gaps, {} middle gaps, {} end gaps", 
+            start_gaps + middle_gaps + end_gaps, 
+            start_gaps, 
+            middle_gaps, 
+            end_gaps);
+    } else if fill_gaps == 1 {
+        info!("Filled {} middle gaps", middle_gaps);
     }
 
     Ok(())
