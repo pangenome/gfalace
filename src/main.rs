@@ -830,8 +830,26 @@ fn write_graph_to_gfa(
             let mut next_idx = current_range_idx + 1;
             let mut end_range = start_range;
             
-            // Initialize path elements vector with first range
+            // Initialize path elements vector
             let mut path_elements = Vec::new();
+
+            // Handle initial gap if it exists and gap filling is enabled
+            if fill_gaps && start_range.start > 0 {
+                let gap_element = create_gap_node(
+                    &mut file,
+                    0,
+                    start_range.start,
+                    path_key,
+                    fasta_reader,
+                    None, // No previous element for initial gap
+                    start_range.steps.first(),
+                    &id_mapping,
+                    &mut new_id,
+                )?;
+                path_elements.push(gap_element);
+            }
+
+            // Add first range steps
             add_range_steps_to_path(start_range, &id_mapping, &mut path_elements);
             
             // Process subsequent contiguous ranges or add gap nodes
@@ -844,41 +862,19 @@ fn write_graph_to_gfa(
                     end_range = next_range;
                     next_idx += 1;
                 } else if fill_gaps {
-                    // Add node to fill the gap between ranges
-                    let gap_size = next_range.start - end_range.end;
-                    assert!(gap_size > 0);
-                    let gap_sequence = if let Some(reader) = fasta_reader {
-                        // `begin` and `end` are both 0-based (to get the 1-st nucleotide, set `begin = 0` and `end = 0`)
-                        match reader.fetch_seq_string(path_key, end_range.end, next_range.start - 1) {
-                            Ok(seq) => {seq},
-                            Err(e) => {
-                                error!("Failed to fetch sequence: {}", e);
-                                "N".repeat(gap_size)
-                            }
-                        }
-                    } else {
-                        "N".repeat(gap_size)
-                    };
-                    // Write gap node
-                    writeln!(file, "S\t{}\t{}", new_id, gap_sequence)?;
-
-                    // Add edge to previous range's last node
-                    if let Some(last_element) = path_elements.last() {
-                        let last_id = last_element[..last_element.len()-1].parse::<usize>().unwrap();
-                        let last_orient = &last_element[last_element.len()-1..];
-                        writeln!(file, "L\t{}\t{}\t{}\t+\t0M", last_id, last_orient, new_id)?;
-                    }
-
-                    // Add edge to next range's first node
-                    if let Some(first_handle) = &next_range.steps.first() {
-                        let first_id = id_mapping[u64::from(first_handle.id()) as usize];
-                        let first_orient = if first_handle.is_reverse() { "-" } else { "+" };
-                        writeln!(file, "L\t{}\t+\t{}\t{}\t0M", new_id, first_id, first_orient)?;
-                    }
-
-                    // Add gap node to path
-                    path_elements.push(format!("{}+", new_id));
-                    new_id += 1;
+                    // Fill gap between ranges
+                    let gap_element = create_gap_node(
+                        &mut file,
+                        end_range.end,
+                        next_range.start,
+                        path_key,
+                        fasta_reader,
+                        path_elements.last(),
+                        next_range.steps.first(),
+                        &id_mapping,
+                        &mut new_id,
+                    )?;
+                    path_elements.push(gap_element);
 
                     // Continue addint stpes of the next range
                     add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
@@ -890,6 +886,31 @@ fn write_graph_to_gfa(
                 }
             }
 
+            // Handle final gap if sequence length is known and gap filling is enabled
+            if fill_gaps {
+                // Get sequence length if FASTA is provided
+                if let Some(total_length) = fasta_reader.as_ref().map(|reader| reader.fetch_seq_len(path_key) as usize) {
+                    if end_range.end < total_length {
+                        let gap_element = create_gap_node(
+                            &mut file,
+                            end_range.end,
+                            total_length,
+                            path_key,
+                            fasta_reader,
+                            path_elements.last(),
+                            None,  // No next node for final gap
+                            &id_mapping,
+                            &mut new_id,
+                        )?;
+                        path_elements.push(gap_element);
+                    } else if end_range.end > total_length {
+                        warn!("Path '{}' extends beyond sequence length ({} > {})", 
+                            path_key, end_range.end, total_length);
+                    }
+                }
+            }
+
+            // Write path
             if !path_elements.is_empty() {
                 let path_name = if next_idx - current_range_idx == ranges.len() {
                     // All ranges are contiguous - use original path key
@@ -911,6 +932,55 @@ fn write_graph_to_gfa(
     }
 
     Ok(())
+}
+
+fn create_gap_node(
+    file: &mut File,
+    gap_start: usize,
+    gap_end: usize,
+    path_key: &str,
+    fasta_reader: &Option<faidx::Reader>,
+    last_element: Option<&String>,
+    next_handle: Option<&Handle>,
+    id_mapping: &[usize],
+    new_id: &mut usize,
+) -> io::Result<String> {
+    let gap_size = gap_end - gap_start;
+    
+    // Get gap sequence either from FASTA or create string of N's
+    let gap_sequence = if let Some(reader) = fasta_reader {
+        match reader.fetch_seq_string(path_key, gap_start, gap_end - 1) {
+            Ok(seq) => seq,
+            Err(e) => {
+                error!("Failed to fetch sequence: {}", e);
+                "N".repeat(gap_size)
+            }
+        }
+    } else {
+        "N".repeat(gap_size)
+    };
+    
+    // Write gap node
+    writeln!(file, "S\t{}\t{}", new_id, gap_sequence)?;
+
+    // Add edge from previous node if it exists
+    if let Some(last_element) = last_element {
+        let last_id = last_element[..last_element.len()-1].parse::<usize>().unwrap();
+        let last_orient = &last_element[last_element.len()-1..];
+        writeln!(file, "L\t{}\t{}\t{}\t+\t0M", last_id, last_orient, new_id)?;
+    }
+
+    // Add edge to next node if it exists
+    if let Some(handle) = next_handle {
+        let next_id = id_mapping[u64::from(handle.id()) as usize];
+        let next_orient = if handle.is_reverse() { "-" } else { "+" };
+        writeln!(file, "L\t{}\t+\t{}\t{}\t0M", *new_id, next_id, next_orient)?;
+    }
+
+    let path_element = format!("{}+", new_id);
+    *new_id += 1;
+
+    Ok(path_element)
 }
 
 fn add_range_steps_to_path(
