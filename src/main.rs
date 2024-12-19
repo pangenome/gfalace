@@ -784,58 +784,44 @@ fn write_graph_to_gfa(
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
     path_key_vec.sort(); // Sort path keys for consistent output
 
+    let last_new_id = new_id;
+
     for path_key in path_key_vec {
         let ranges = &path_key_ranges[path_key];
 
-        // // Check for overlaps and contiguity
-        // let mut all_contiguous = true;
-        
-        // for window in ranges.windows(2) {
-        //     let r1 = &window[0];
-        //     let r2 = &window[1];
-
-        //     if r1.overlaps_with(r2) {
-        //         panic!("Unresolved overlaps detected in path key '{}': [start={}, end={}] and [start={}, end={}]", path_key, 
-        //         r1.start, r1.end, r2.start, r2.end);
-        //     }
-        //     if !r1.is_contiguous_with(r2) {
-        //         all_contiguous = false;
-        //     }
-        // }
-
-        // if debug && !all_contiguous {
-        //     let mut current_start = ranges[0].start;
-        //     let mut current_end = ranges[0].end;
+        if debug {
+            let mut current_start = ranges[0].start;
+            let mut current_end = ranges[0].end;
             
-        //     for i in 1..ranges.len() {
-        //         if ranges[i-1].is_contiguous_with(&ranges[i]) {
-        //             // Extend current merged range
-        //             current_end = ranges[i].end;
-        //         } else {
-        //             // Print current merged range
-        //             debug!("    Merged range: start={}, end={}", 
-        //                 current_start, current_end);
+            for i in 1..ranges.len() {
+                if ranges[i-1].is_contiguous_with(&ranges[i]) {
+                    // Extend current merged range
+                    current_end = ranges[i].end;
+                } else {
+                    // Print current merged range
+                    debug!("    Merged range: start={}, end={}", 
+                        current_start, current_end);
                     
-        //             if !ranges[i-1].overlaps_with(&ranges[i]) {
-        //                 // Calculate and print gap
-        //                 let gap = ranges[i].start - current_end;
-        //                 debug!("      Gap to next range: {} positions", gap);
-        //             } else {
-        //                 // Calculate and print overlap
-        //                 let overlap = current_end - ranges[i].start;
-        //                 debug!("      Overlap with next range: {} positions", overlap);
-        //             }
+                    if !ranges[i-1].overlaps_with(&ranges[i]) {
+                        // Calculate and print gap
+                        let gap = ranges[i].start - current_end;
+                        debug!("      Gap to next range: {} positions", gap);
+                    } else {
+                        // Calculate and print overlap
+                        let overlap = current_end - ranges[i].start;
+                        debug!("      Overlap with next range: {} positions", overlap);
+                    }
     
-        //             // Start new merged range
-        //             current_start = ranges[i].start;
-        //             current_end = ranges[i].end;
-        //         }
-        //     }
+                    // Start new merged range
+                    current_start = ranges[i].start;
+                    current_end = ranges[i].end;
+                }
+            }
             
-        //     // Print final merged range
-        //     debug!("    Merged range: start={}, end={}", 
-        //         current_start, current_end);
-        // }
+            // Print final merged range
+            debug!("    Merged range: start={}, end={}", 
+                current_start, current_end);
+        }
 
         let mut current_range_idx = 0;
 
@@ -864,13 +850,15 @@ fn write_graph_to_gfa(
                     let gap_sequence = if let Some(reader) = fasta_reader {
                         // `begin` and `end` are both 0-based (to get the 1-st nucleotide, set `begin = 0` and `end = 0`)
                         match reader.fetch_seq_string(path_key, end_range.end, next_range.start - 1) {
-                            Ok(seq) => seq,
-                            Err(_) => "N".repeat(gap_size)
+                            Ok(seq) => {seq},
+                            Err(e) => {
+                                error!("Failed to fetch sequence: {}", e);
+                                "N".repeat(gap_size)
+                            }
                         }
                     } else {
                         "N".repeat(gap_size)
                     };
-
                     // Write gap node
                     writeln!(file, "S\t{}\t{}", new_id, gap_sequence)?;
 
@@ -917,7 +905,11 @@ fn write_graph_to_gfa(
             current_range_idx = next_idx;
         }
     }
-        
+
+    if fill_gaps {
+        info!("Filled {} gaps", new_id - last_new_id);
+    }
+
     Ok(())
 }
 
