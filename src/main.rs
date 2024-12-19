@@ -925,8 +925,15 @@ fn write_graph_to_gfa(
 
             // Write path
             if !path_elements.is_empty() {
-                let path_name = if next_idx - current_range_idx == ranges.len() {
-                    // All ranges are contiguous - use original path key
+                // Check if all ranges are contiguous, and path starts at position 0,
+                // and either no FASTA reader available or path extends to sequence end
+                let is_full_path = next_idx - current_range_idx == ranges.len() 
+                                    && start_range.start == 0
+                                    && fasta_reader.as_ref()
+                                        .map(|reader| reader.fetch_seq_len(path_key))
+                                        .map_or(true, |total_len| end_range.end >= total_len as usize);
+
+                let path_name = if is_full_path {
                     path_key.to_string()
                 } else {
                     // Create path name with range information
