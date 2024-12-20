@@ -1,13 +1,13 @@
 [package]
 name = "gfalace"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 bstr = "1.11.0"
-niffler = "2.6.0"
+niffler = { version = "2.6.0", default-features = false, features = ["bz2", "gz", "bgz", "zstd"] } # lzma conflicts with lzma in rust-htslib
 clap = { version = "4.5.22", features = ["derive"] }
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 gfa = "0.10.1"
@@ -16,3 +16,4 @@ tempfile = "3.14.0"
 rustc-hash = "2.1.0"
 log = "0.4.22"
 env_logger = "0.11.5"
+rust-htslib = "0.49.0"

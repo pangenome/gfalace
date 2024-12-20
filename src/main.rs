@@ -9,13 +9,13 @@ use handlegraph::{
     handle::{Handle, NodeId, Edge},
     handlegraph::*,
     mutablehandlegraph::*,
-    pathhandlegraph::GraphPaths,
     hashgraph::HashGraph,
 };
 use gfa::{gfa::GFA, parser::GFAParser};
 use bitvec::{bitvec, prelude::BitVec};
 use tempfile::NamedTempFile;
 use log::{debug, info, warn, error};
+use rust_htslib::faidx;
 
 // use std::process::Command;
 
@@ -46,6 +46,14 @@ struct Args {
     #[clap(short, long, value_parser)]
     output: String,
 
+    /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --fasta for end gaps)
+    #[clap(long, default_value = "0")]
+    fill_gaps: u8,
+
+    /// FASTA file containing sequences for gap filling
+    #[clap(long)]
+    fasta: Option<String>,
+
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
     verbose: u8,
@@ -63,6 +71,11 @@ fn main() {
     })
     .init();
 
+    let fasta_reader = args.fasta.as_ref().map(|fasta_path| faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
+            error!("Failed to open FASTA file: {}", e);
+            std::process::exit(1);
+        }));
+
     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
@@ -79,12 +92,12 @@ fn main() {
         trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
         link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
-    info!("Created {} nodes, {} edges, and {} paths",
-        combined_graph.node_count(), combined_graph.edge_count(), combined_graph.path_count());
+    info!("Created {} nodes and {} edges",
+        combined_graph.node_count(), combined_graph.edge_count());
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&combined_graph, &path_key_ranges, &args.output, args.verbose > 1) {
+    match write_graph_to_gfa(&combined_graph, &path_key_ranges, &args.output, args.fill_gaps, &fasta_reader, args.verbose > 1) {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
@@ -717,10 +730,12 @@ fn write_graph_to_gfa(
     graph: &HashGraph, 
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
     output_path: &str,
+    fill_gaps: u8,
+    fasta_reader: &Option<faidx::Reader>,
     debug: bool
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
-    let nodes_to_remove : BitVec = mark_nodes_for_removal(&graph, path_key_ranges);    
+    let nodes_to_remove : BitVec = mark_nodes_for_removal(graph, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
     let mut file = File::create(output_path)?;
@@ -765,26 +780,19 @@ fn write_graph_to_gfa(
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
     path_key_vec.sort(); // Sort path keys for consistent output
 
+    let mut start_gaps = 0;
+    let mut middle_gaps = 0;
+    let mut end_gaps = 0;
+
+    // Check if a valid FASTA reader is provided for end gap filling
+    if fill_gaps == 2 && fasta_reader.is_none() {
+        warn!("Cannot fill end gaps without FASTA file");
+    }
+
     for path_key in path_key_vec {
         let ranges = &path_key_ranges[path_key];
 
-        // Check for overlaps and contiguity
-        let mut all_contiguous = true;
-        
-        for window in ranges.windows(2) {
-            let r1 = &window[0];
-            let r2 = &window[1];
-
-            if r1.overlaps_with(r2) {
-                panic!("Unresolved overlaps detected in path key '{}': [start={}, end={}] and [start={}, end={}]", path_key, 
-                r1.start, r1.end, r2.start, r2.end);
-            }
-            if !r1.is_contiguous_with(r2) {
-                all_contiguous = false;
-            }
-        }
-
-        if !all_contiguous && debug {
+        if debug {
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
             
@@ -825,25 +833,104 @@ fn write_graph_to_gfa(
             let mut next_idx = current_range_idx + 1;
             let mut end_range = start_range;
             
-            // Find contiguous ranges
-            while next_idx < ranges.len() && ranges[next_idx - 1].is_contiguous_with(&ranges[next_idx]) {
-                end_range = &ranges[next_idx];
-                next_idx += 1;
+            // Initialize path elements vector
+            let mut path_elements = Vec::new();
+
+            // Handle initial gap if it exists and gap filling is enabled
+            if fill_gaps == 2 && start_range.start > 0 {
+                start_gaps += 1;
+
+                let gap_element = create_gap_node(
+                    &mut file,
+                    (0, start_range.start),
+                    path_key,
+                    fasta_reader,
+                    None, // No previous element for initial gap
+                    start_range.steps.first(),
+                    &id_mapping,
+                    &mut new_id,
+                )?;
+                path_elements.push(gap_element);
             }
 
-            // Create path elements for contiguous range group
-            let mut path_elements = Vec::new();
-            for idx in current_range_idx..next_idx {
-                for handle in &ranges[idx].steps {
-                    let node_id = id_mapping[u64::from(handle.id()) as usize];
-                    let orient = if handle.is_reverse() { "-" } else { "+" };
-                    path_elements.push(format!("{}{}", node_id, orient));
+            // Add first range steps
+            add_range_steps_to_path(start_range, &id_mapping, &mut path_elements);
+            
+            // Process subsequent contiguous ranges or add gap nodes
+            while next_idx < ranges.len() {
+                let next_range = &ranges[next_idx];
+
+                if ranges[next_idx - 1].is_contiguous_with(next_range) {
+                    // Ranges are contiguous - add steps directly
+                    add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
+                    end_range = next_range;
+                    next_idx += 1;
+                } else if fill_gaps > 0 {
+                    middle_gaps += 1;
+
+                    // Fill gap between ranges
+                    let gap_element = create_gap_node(
+                        &mut file,
+                        (end_range.end, next_range.start),
+                        path_key,
+                        fasta_reader,
+                        path_elements.last(),
+                        next_range.steps.first(),
+                        &id_mapping,
+                        &mut new_id,
+                    )?;
+                    path_elements.push(gap_element);
+
+                    // Continue addint stpes of the next range
+                    add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
+                    end_range = next_range;
+                    next_idx += 1;
+                } else {
+                    // Not filling gaps - break and create new path
+                    break;
                 }
             }
 
+            // Handle final gap if sequence length is known and gap filling is enabled
+            if fill_gaps == 2 {
+                // Get sequence length if FASTA is provided
+                if let Some(total_length) = fasta_reader.as_ref().map(|reader| reader.fetch_seq_len(path_key) as usize) {
+                    match end_range.end.cmp(&total_length) {
+                        std::cmp::Ordering::Less => {
+                            end_gaps += 1;
+                    
+                            let gap_element = create_gap_node(
+                                &mut file,
+                                (end_range.end, total_length),
+                                path_key,
+                                fasta_reader,
+                                path_elements.last(),
+                                None,  // No next node for final gap
+                                &id_mapping,
+                                &mut new_id,
+                            )?;
+                            path_elements.push(gap_element);
+                        }
+                        std::cmp::Ordering::Greater => {
+                            warn!("Path '{}' extends beyond sequence length ({} > {})", 
+                                path_key, end_range.end, total_length);
+                        }
+                        std::cmp::Ordering::Equal => {}
+                    }
+                }
+            }
+
+            // Write path
             if !path_elements.is_empty() {
-                let path_name = if next_idx - current_range_idx == ranges.len() {
-                    // All ranges are contiguous - use original path key
+                // Check if all ranges are contiguous, and path starts at position 0,
+                // and either no FASTA reader available or path extends to sequence end
+                let is_full_path = next_idx - current_range_idx == ranges.len() 
+                                    && start_range.start == 0
+                                    && fasta_reader.as_ref()
+                                        .map(|reader| reader.fetch_seq_len(path_key))
+                                        .map_or(true, |total_len| end_range.end >= total_len as usize);
+
+                let path_name = if is_full_path {
                     path_key.to_string()
                 } else {
                     // Create path name with range information
@@ -856,8 +943,79 @@ fn write_graph_to_gfa(
             current_range_idx = next_idx;
         }
     }
-        
+
+    if fill_gaps == 2 {
+        info!("Filled {} gaps: {} start gaps, {} middle gaps, {} end gaps", 
+            start_gaps + middle_gaps + end_gaps, 
+            start_gaps, 
+            middle_gaps, 
+            end_gaps);
+    } else if fill_gaps == 1 {
+        info!("Filled {} middle gaps", middle_gaps);
+    }
+
     Ok(())
+}
+
+fn create_gap_node(
+    file: &mut File,
+    gap_range: (usize, usize),
+    path_key: &str,
+    fasta_reader: &Option<faidx::Reader>,
+    last_element: Option<&String>,
+    next_handle: Option<&Handle>,
+    id_mapping: &[usize],
+    new_id: &mut usize,
+) -> io::Result<String> {
+    let (gap_start, gap_end) = gap_range;
+    let gap_size = gap_end - gap_start;
+    
+    // Get gap sequence either from FASTA or create string of N's
+    let gap_sequence = if let Some(reader) = fasta_reader {
+        match reader.fetch_seq_string(path_key, gap_start, gap_end - 1) {
+            Ok(seq) => seq,
+            Err(e) => {
+                error!("Failed to fetch sequence: {}", e);
+                "N".repeat(gap_size)
+            }
+        }
+    } else {
+        "N".repeat(gap_size)
+    };
+    
+    // Write gap node
+    writeln!(file, "S\t{}\t{}", new_id, gap_sequence)?;
+
+    // Add edge from previous node if it exists
+    if let Some(last_element) = last_element {
+        let last_id = last_element[..last_element.len()-1].parse::<usize>().unwrap();
+        let last_orient = &last_element[last_element.len()-1..];
+        writeln!(file, "L\t{}\t{}\t{}\t+\t0M", last_id, last_orient, new_id)?;
+    }
+
+    // Add edge to next node if it exists
+    if let Some(handle) = next_handle {
+        let next_id = id_mapping[u64::from(handle.id()) as usize];
+        let next_orient = if handle.is_reverse() { "-" } else { "+" };
+        writeln!(file, "L\t{}\t+\t{}\t{}\t0M", *new_id, next_id, next_orient)?;
+    }
+
+    let path_element = format!("{}+", new_id);
+    *new_id += 1;
+
+    Ok(path_element)
+}
+
+fn add_range_steps_to_path(
+    range: &RangeInfo,
+    id_mapping: &[usize],
+    path_elements: &mut Vec<String>
+) {
+    for handle in &range.steps {
+        let node_id = id_mapping[u64::from(handle.id()) as usize];
+        let orient = if handle.is_reverse() { "-" } else { "+" };
+        path_elements.push(format!("{}{}", node_id, orient));
+    }
 }
 
 #[cfg(test)]
