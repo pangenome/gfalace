@@ -36,20 +36,6 @@ You can mix gzip-compressed (`.gfa.gz`) and uncompressed (`.gfa`) files in the i
 
 The input GFA files can be provided in any order. This is because GFALace uses the coordinate information in the path names (CHROM:START-END) to determine the correct ordering and relationships between sequences.
 
-### Advanced usage
-
-Filling middle gaps with `N`s:
-
-```bash
-gfalace -g *.gfa -o combined.gfa --fill_gaps 1
-```
-
-Filling all gaps with pangenome sequences:
-
-```bash
-gfalace -g *.gfa -o combined.gfa --fill_gaps 2 --fasta pangenome.fasta
-```
-
 ## Options
 
 - `-g, --gfa-list`: List of input GFA files (space-separated)
@@ -86,7 +72,38 @@ Note: `NAME` can contain ':' characters. When parsing coordinates, GFALace uses 
 - Preserves original sequence and path relationships
 - Outputs a standard-compliant GFA 1.0 file
 
-### Gap Filling Modes
+## Post-Processing Recommendations
+
+After combining the GFA files, the resulting graph will already have compacted node IDs ranging from `1` to the total number of nodes. However, it is strongly recommended to perform post-processing steps using **[ODGI]((https://github.com/pangenome/odgi)** to unchop and sort the graph.
+
+```bash
+odgi unchop -i combined.gfa -o - -t 16 | \
+    odgi sort -i - -o - -p gYs -t 16 | \
+    odgi view -i - -g > combined.final.gfa
+```
+
+If overlaps were present, and then trimmed during the merging process, it's advisable to run **[GFAffix](https://github.com/marschall-lab/GFAffix)** before the ODGI pipeline to remove redundant nodes introduced by the overlap trimming.
+
+```bash
+gfaffix combined.gfa -o combined.fix.gfa &> /dev/null
+odgi unchop -i combined.fix.gfa -o - -t 16 | \
+    odgi sort -i - -o - -p gYs -t 16 | \
+    odgi view -i - -g > combined.final.gfa
+```
+
+### Advanced usage
+
+Filling middle gaps with `N`s:
+
+```bash
+gfalace -g *.gfa -o combined.gfa --fill_gaps 1
+```
+
+Filling all gaps with pangenome sequences:
+
+```bash
+gfalace -g *.gfa -o combined.gfa --fill_gaps 2 --fasta pangenome.fasta
+```
 
 GFALace provides options to fill gaps between graphs based on the specified gap filling mode:
 
