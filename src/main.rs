@@ -71,14 +71,10 @@ fn main() {
     })
     .init();
 
-    let fasta_reader = if let Some(fasta_path) = &args.fasta {
-        Some(faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
+    let fasta_reader = args.fasta.as_ref().map(|fasta_path| faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
             error!("Failed to open FASTA file: {}", e);
             std::process::exit(1);
-        }))
-    } else {
-        None
-    };
+        }));
 
     // log_memory_usage("start");
 
@@ -739,7 +735,7 @@ fn write_graph_to_gfa(
     debug: bool
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
-    let nodes_to_remove : BitVec = mark_nodes_for_removal(&graph, path_key_ranges);    
+    let nodes_to_remove : BitVec = mark_nodes_for_removal(graph, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
     let mut file = File::create(output_path)?;
@@ -846,8 +842,7 @@ fn write_graph_to_gfa(
 
                 let gap_element = create_gap_node(
                     &mut file,
-                    0,
-                    start_range.start,
+                    (0, start_range.start),
                     path_key,
                     fasta_reader,
                     None, // No previous element for initial gap
@@ -876,8 +871,7 @@ fn write_graph_to_gfa(
                     // Fill gap between ranges
                     let gap_element = create_gap_node(
                         &mut file,
-                        end_range.end,
-                        next_range.start,
+                        (end_range.end, next_range.start),
                         path_key,
                         fasta_reader,
                         path_elements.last(),
@@ -901,24 +895,27 @@ fn write_graph_to_gfa(
             if fill_gaps == 2 {
                 // Get sequence length if FASTA is provided
                 if let Some(total_length) = fasta_reader.as_ref().map(|reader| reader.fetch_seq_len(path_key) as usize) {
-                    if end_range.end < total_length {
-                        end_gaps += 1;
-
-                        let gap_element = create_gap_node(
-                            &mut file,
-                            end_range.end,
-                            total_length,
-                            path_key,
-                            fasta_reader,
-                            path_elements.last(),
-                            None,  // No next node for final gap
-                            &id_mapping,
-                            &mut new_id,
-                        )?;
-                        path_elements.push(gap_element);
-                    } else if end_range.end > total_length {
-                        warn!("Path '{}' extends beyond sequence length ({} > {})", 
-                            path_key, end_range.end, total_length);
+                    match end_range.end.cmp(&total_length) {
+                        std::cmp::Ordering::Less => {
+                            end_gaps += 1;
+                    
+                            let gap_element = create_gap_node(
+                                &mut file,
+                                (end_range.end, total_length),
+                                path_key,
+                                fasta_reader,
+                                path_elements.last(),
+                                None,  // No next node for final gap
+                                &id_mapping,
+                                &mut new_id,
+                            )?;
+                            path_elements.push(gap_element);
+                        }
+                        std::cmp::Ordering::Greater => {
+                            warn!("Path '{}' extends beyond sequence length ({} > {})", 
+                                path_key, end_range.end, total_length);
+                        }
+                        std::cmp::Ordering::Equal => {}
                     }
                 }
             }
@@ -962,8 +959,7 @@ fn write_graph_to_gfa(
 
 fn create_gap_node(
     file: &mut File,
-    gap_start: usize,
-    gap_end: usize,
+    gap_range: (usize, usize),
     path_key: &str,
     fasta_reader: &Option<faidx::Reader>,
     last_element: Option<&String>,
@@ -971,6 +967,7 @@ fn create_gap_node(
     id_mapping: &[usize],
     new_id: &mut usize,
 ) -> io::Result<String> {
+    let (gap_start, gap_end) = gap_range;
     let gap_size = gap_end - gap_start;
     
     // Get gap sequence either from FASTA or create string of N's
