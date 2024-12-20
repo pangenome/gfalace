@@ -162,7 +162,7 @@ fn read_gfa_files(
             combined_graph.create_edge(translated_edge);
         }
         
-        debug!("GFA file {} ({}) processed: Added {} nodes and {} edges", gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
+        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
 
         // Process paths and collect ranges with their steps
         for (_path_id, path_ref) in block_graph.paths.iter() {
@@ -197,7 +197,7 @@ fn read_gfa_files(
                         step_ends,
                     });
                 } else {
-                    warn!("  Path '{}' has no steps", path_name);
+                    warn!("    Path '{}' has no steps", path_name);
                 }
             }
         }
@@ -294,12 +294,12 @@ fn sort_and_filter_ranges(
     ranges.sort_by_key(|r| (r.start, r.end));
 
     if debug {
-        debug!("Processing path key '{}'", path_key);
+        debug!("  Path key '{}' at the beginning", path_key);
         for range in ranges.iter() {
-            debug!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
         }
 
-        debug!("Removing redundant ranges");
+        debug!("  Removing redundant ranges");
     }
 
     // Remove ranges that are contained within other ranges
@@ -311,30 +311,27 @@ fn sort_and_filter_ranges(
         if curr_start == prev_start && curr_end == prev_end {
             // Skip duplicate range
             // Current range is a duplicate of the previous range, skip it
-            if debug {
-                debug!(
-                    "  Duplicate range detected: Range [start={}, end={}] is identical to previous range and will be removed.",
-                    curr_start, curr_end
-                );
-            }
+            debug!(
+                "    Duplicate range detected: Range [start={}, end={}] is identical to previous range and will be removed.",
+                curr_start, curr_end
+            );
+
             continue;
         } else if curr_start >= prev_start && curr_end <= prev_end {
             // Skip range that is fully contained within previous range
-            if debug {
-                debug!(
-                    "  Contained range detected: Range [start={}, end={}] is fully contained within previous range [start={}, end={}] and will be removed.",
-                    curr_start, curr_end, prev_start, prev_end
-                );
-            }
+            debug!(
+                "    Contained range detected: Range [start={}, end={}] is fully contained within previous range [start={}, end={}] and will be removed.",
+                curr_start, curr_end, prev_start, prev_end
+            );
+
             continue;
         } else if prev_start >= curr_start && prev_end <= curr_end {
             // Previous range is fully contained within current range
-            if debug {
-                debug!(
-                    "  Containing range detected: Previous range [start={}, end={}] is fully contained within current range [start={}, end={}] and will be removed.",
-                    prev_start, prev_end, curr_start, curr_end
-                );
-            }
+            debug!(
+                "    Containing range detected: Previous range [start={}, end={}] is fully contained within current range [start={}, end={}] and will be removed.",
+                prev_start, prev_end, curr_start, curr_end
+            );
+
             ranges.swap(write_idx, read_idx);
         } else if curr_start < prev_end {
             // Handle overlapping ranges - check both previous and next ranges
@@ -357,12 +354,10 @@ fn sort_and_filter_ranges(
             }
             
             if !should_skip {
-                if debug {
-                    debug!(
-                        "  Overlapping range detected: Range [start={}, end={}] overlaps with previous range [start={}, end={}] and will be kept.",
-                        curr_start, curr_end, prev_start, prev_end
-                    );
-                }
+                debug!(
+                    "    Overlapping range detected: Range [start={}, end={}] overlaps with previous range [start={}, end={}] and will be kept.",
+                    curr_start, curr_end, prev_start, prev_end
+                );
                 write_idx += 1;
                 if write_idx != read_idx {
                     ranges.swap(write_idx, read_idx);
@@ -379,9 +374,9 @@ fn sort_and_filter_ranges(
     ranges.truncate(write_idx + 1);
     
     if debug {
-        debug!("Path key '{}' without redundancy", path_key);
+        debug!("  Path key '{}' without redundancy", path_key);
         for range in ranges.iter() {
-            debug!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
         }
     }
 }
@@ -393,7 +388,7 @@ fn trim_range_overlaps(
     debug: bool
 ) {
     // Trim overlaps
-    debug!("Trimming overlapping ranges");
+    debug!("  Trimming overlapping ranges");
 
     let mut next_node_id_value = u64::from(combined_graph.max_node_id()) + 1;
 
@@ -408,7 +403,7 @@ fn trim_range_overlaps(
             let overlap_end = std::cmp::min(r1.end, r2.end);
 
             debug!(
-                "  Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}], Overlap size={}",
+                "    Overlap detected: Range1 [start={}, end={}], Range2 [start={}, end={}], Overlap [start={}, end={}, size={}]",
                 r1.start, r1.end, r2.start, r2.end, overlap_start, overlap_end, overlap_end - overlap_start
             );
 
@@ -474,11 +469,11 @@ fn trim_range_overlaps(
                     let overlap_start_offset = (overlap_within_step_start - step_start).min(node_len);
                     let overlap_end_offset = (overlap_within_step_end - step_start).min(node_len);
 
-                    debug!("    Splitting step {} [start={}, end={}, len={}] to remove overlap at [start={}, end={}]\n    Overlap offsets: start={}, end={}",
+                    debug!("      Splitting step {} [start={}, end={}, len={}] to remove overlap at [start={}, end={}], Overlap offsets: start={}, end={}",
                         idx, step_start, step_end, step_end - step_start, overlap_within_step_start, overlap_within_step_end, overlap_start_offset, overlap_end_offset);
 
                     if step_start < overlap_start {
-                        debug!("    Adding left part of step [start={}, end={}]", step_start, overlap_within_step_start);
+                        debug!("      Adding left part of step [start={}, end={}]", step_start, overlap_within_step_start);
                         assert!(overlap_start_offset > 0);
 
                         // Keep left part
@@ -494,7 +489,7 @@ fn trim_range_overlaps(
                             range_new_start = Some(step_start);
                         }
                     } else if step_end > overlap_end {
-                        debug!("    Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
+                        debug!("      Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
                         assert!(overlap_end_offset < node_len);
 
                         // Keep right part
@@ -544,14 +539,14 @@ fn trim_range_overlaps(
                 r2.end = overlap_end;
             }
 
-            debug!("    Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
+            debug!("      Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
         }
     }
 
     if debug {
-        debug!("Path key '{}' without overlaps", path_key);
+        debug!("  Path key '{}' without overlaps", path_key);
         for range in ranges.iter() {
-            debug!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
         }
     }
 }
@@ -563,7 +558,7 @@ fn link_contiguous_ranges(
     debug: bool
 ) {
     // Trim overlaps
-    debug!("Linking contiguous ranges");
+    debug!("  Linking contiguous ranges");
 
     for i in 1..ranges.len() {
         let (left, right) = ranges.split_at_mut(i);
@@ -577,16 +572,16 @@ fn link_contiguous_ranges(
                 // Create edge if it doesn't exist
                 if !combined_graph.has_edge(last_handle, first_handle) {
                     combined_graph.create_edge(Edge(last_handle, first_handle));
-                    debug!("  Created edge between contiguous ranges at position {}", r1.end);
+                    debug!("    Created edge between contiguous ranges at position {}", r1.end);
                 }
             }
         }
     }
 
     if debug {
-        debug!("Path key '{}' without overlaps", path_key);
+        debug!("  Path key '{}' without overlaps", path_key);
         for range in ranges.iter() {
-            debug!("  Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
         }
     }
 }
@@ -793,6 +788,8 @@ fn write_graph_to_gfa(
         let ranges = &path_key_ranges[path_key];
 
         if debug {
+            debug!("Processing Path key '{}'", path_key);
+            
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
             
@@ -802,17 +799,17 @@ fn write_graph_to_gfa(
                     current_end = ranges[i].end;
                 } else {
                     // Print current merged range
-                    debug!("    Merged range: start={}, end={}", 
+                    debug!("  Merged range: start={}, end={}", 
                         current_start, current_end);
                     
                     if !ranges[i-1].overlaps_with(&ranges[i]) {
                         // Calculate and print gap
                         let gap = ranges[i].start - current_end;
-                        debug!("      Gap to next range: {} positions", gap);
+                        debug!("    Gap to next range: {} positions", gap);
                     } else {
-                        // Calculate and print overlap
+                        // Calculate and print overlap (IT SHOULD NOT HAPPEN)
                         let overlap = current_end - ranges[i].start;
-                        debug!("      Overlap with next range: {} positions", overlap);
+                        debug!("    Overlap with next range: {} positions", overlap);
                     }
     
                     // Start new merged range
@@ -822,7 +819,7 @@ fn write_graph_to_gfa(
             }
             
             // Print final merged range
-            debug!("    Merged range: start={}, end={}", 
+            debug!("  Merged range: start={}, end={}", 
                 current_start, current_end);
         }
 
