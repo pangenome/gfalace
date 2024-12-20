@@ -74,7 +74,7 @@ Note: `NAME` can contain ':' characters. When parsing coordinates, GFALace uses 
 
 ## Post-Processing Recommendations
 
-After combining the GFA files, the resulting graph will already have compacted node IDs ranging from `1` to the total number of nodes. However, it is strongly recommended to perform post-processing steps using **[ODGI]((https://github.com/pangenome/odgi)** to unchop and sort the graph.
+After combining the GFA files, the resulting graph will already have compacted node IDs ranging from `1` to the total number of nodes. However, it is strongly recommended to perform post-processing steps using **[ODGI](https://github.com/pangenome/odgi)** to unchop and sort the graph.
 
 ```bash
 odgi unchop -i combined.gfa -o - -t 16 | \
@@ -86,6 +86,7 @@ If overlaps were present, and then trimmed during the merging process, it's advi
 
 ```bash
 gfaffix combined.gfa -o combined.fix.gfa &> /dev/null
+
 odgi unchop -i combined.fix.gfa -o - -t 16 | \
     odgi sort -i - -o - -p gYs -t 16 | \
     odgi view -i - -g > combined.final.gfa
