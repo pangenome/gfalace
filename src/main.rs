@@ -563,7 +563,7 @@ fn link_contiguous_ranges(
     debug: bool
 ) {
     // Trim overlaps
-    debug!("Linking overlapping ranges");
+    debug!("Linking contiguous ranges");
 
     for i in 1..ranges.len() {
         let (left, right) = ranges.split_at_mut(i);
