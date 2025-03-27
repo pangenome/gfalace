@@ -739,7 +739,7 @@ fn write_graph_to_gfa(
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
     let nodes_to_remove : BitVec = mark_nodes_for_removal(graph, path_key_ranges);    
-    debug!("Marked {} nodes", nodes_to_remove.count_ones());
+    debug!("Marked {} nodes", nodes_to_remove.count_ones() - 1);
     
     let mut file = File::create(output_path)?;
     
