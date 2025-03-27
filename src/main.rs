@@ -54,6 +54,10 @@ struct Args {
     #[clap(long)]
     fasta: Option<String>,
 
+    /// Naive joining of paths by name rather than range
+    #[clap(long)]
+    naive_join: bool,
+
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
     verbose: u8,
@@ -79,7 +83,7 @@ fn main() {
     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
-    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list);
+    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list,args.naive_join);
 
     // log_memory_usage("after_reading_files");
 
@@ -129,6 +133,7 @@ impl RangeInfo {
 
 fn read_gfa_files(
     gfa_list: &[String],
+    naive_join: bool,
 ) -> (HashGraph, FxHashMap<String, Vec<RangeInfo>>) {
     let mut combined_graph = HashGraph::new();
     let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
@@ -168,7 +173,7 @@ fn read_gfa_files(
         for (_path_id, path_ref) in block_graph.paths.iter() {
             let path_name = String::from_utf8_lossy(&path_ref.name);
             
-            if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
+            if let Some((sample_hap_name, start, end)) = split_path_name(&path_name, naive_join) {
                 // Get the path steps and translate their IDs
                 let mut translated_steps = Vec::new();
                 let mut step_ends = Vec::new();
@@ -268,7 +273,11 @@ fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> io::Result<GFA<usi
     }
 }
 
-fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
+fn split_path_name(path_name: &str, naive_join: bool) -> Option<(String, usize, usize)> {
+
+    if naive_join {
+        return Some((path_name.to_string(),usize::MIN,usize::MAX));
+    }
     // Find the last ':' to split the range from the key
     if let Some(last_colon) = path_name.rfind(':') {
         let (key, range_str) = path_name.split_at(last_colon);
@@ -708,7 +717,6 @@ fn mark_nodes_for_removal(
     // Create a bitvector with all nodes initially marked for removal
     let max_node_id = u64::from(graph.max_node_id());
     let mut nodes_to_remove = bitvec![1; max_node_id as usize + 1];
-    
     // Mark nodes used in path ranges as not to be removed (set bit to 0)
     for ranges in path_key_ranges.values() {
         for range in ranges {
@@ -731,7 +739,7 @@ fn write_graph_to_gfa(
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
     let nodes_to_remove : BitVec = mark_nodes_for_removal(graph, path_key_ranges);    
-    debug!("Marked {} nodes", nodes_to_remove.count_ones());
+    debug!("Marked {} nodes", nodes_to_remove.count_ones() - 1);
     
     let mut file = File::create(output_path)?;
     
