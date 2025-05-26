@@ -54,6 +54,10 @@ struct Args {
     #[clap(long)]
     fasta: Option<String>,
 
+    /// Working directory for temporary files (default: same as input files)
+    #[clap(long, value_parser)]
+    temp_dir: Option<String>,
+
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
     verbose: u8,
@@ -79,7 +83,7 @@ fn main() {
     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
-    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list);
+    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list, args.temp_dir.as_deref());
 
     // log_memory_usage("after_reading_files");
 
@@ -129,6 +133,7 @@ impl RangeInfo {
 
 fn read_gfa_files(
     gfa_list: &[String],
+    temp_dir: Option<&str>,
 ) -> (HashGraph, FxHashMap<String, Vec<RangeInfo>>) {
     let mut combined_graph = HashGraph::new();
     let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
@@ -139,7 +144,7 @@ fn read_gfa_files(
     // Process each GFA file
     let parser = GFAParser::new();
     for (gfa_id, gfa_path) in gfa_list.iter().enumerate() {
-        let gfa = read_gfa(gfa_path, &parser).unwrap();
+        let gfa = read_gfa(gfa_path, &parser, temp_dir).unwrap();
         let block_graph = HashGraph::from_gfa(&gfa);
 
         // Record the id translation for this block
@@ -209,7 +214,7 @@ fn read_gfa_files(
     (combined_graph, path_key_ranges)
 }
 
-fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> io::Result<GFA<usize, ()>> {
+fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>, temp_dir: Option<&str>) -> io::Result<GFA<usize, ()>> {
     if gfa_path.ends_with(".gz") {
         let file = std::fs::File::open(gfa_path).map_err(|e| {
             io::Error::new(
@@ -229,12 +234,25 @@ fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>) -> io::Result<GFA<usi
             )
         })?;
         
-        // Create temporary file in the same directory as the input file for better performance
-        let parent_dir = Path::new(gfa_path).parent().unwrap_or(Path::new("."));
-        let temp_file = NamedTempFile::new_in(parent_dir).map_err(|e| {
+        // Create temporary file in the working directory if specified, otherwise in the same directory as the input file
+        let temp_dir = if let Some(work_dir) = temp_dir {
+            Path::new(work_dir)
+        } else {
+            Path::new(gfa_path).parent().unwrap_or(Path::new("."))
+        };
+        
+        // Create the directory if it doesn't exist
+        std::fs::create_dir_all(temp_dir).map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("Failed to create temporary file: {}", e)
+                format!("Failed to create working directory '{}': {}", temp_dir.display(), e)
+            )
+        })?;
+        
+        let temp_file = NamedTempFile::new_in(temp_dir).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("Failed to create temporary file in '{}': {}", temp_dir.display(), e)
             )
         })?;
         
