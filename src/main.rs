@@ -38,9 +38,13 @@ use rust_htslib::faidx;
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
-    /// List of GFA file paths to combine
-    #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
-    gfa_list: Vec<String>,
+    /// List of GFA file paths to combine (can use wildcards)
+    #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
+    gfa_files: Option<Vec<String>>,
+
+    /// Text file containing list of GFA file paths (one per line)
+    #[clap(short = 'l', long, value_parser, conflicts_with = "gfa_files")]
+    gfa_list: Option<String>,
 
     /// Output GFA file path for the combined graph
     #[clap(short, long, value_parser)]
@@ -75,6 +79,39 @@ fn main() {
     })
     .init();
 
+    // Get the list of GFA files
+    let gfa_files = match (args.gfa_files, args.gfa_list) {
+        (Some(files), None) => files,
+        (None, Some(list_file)) => {
+            // Read file paths from the list file
+            match std::fs::read_to_string(&list_file) {
+                Ok(content) => {
+                    content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                        .map(|line| line.trim().to_string())
+                        .collect()
+                }
+                Err(e) => {
+                    error!("Failed to read GFA list file '{}': {}", list_file, e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        (None, None) => {
+            error!("Either --gfa-files (-g) or --gfa-list (-l) must be specified");
+            std::process::exit(1);
+        }
+        (Some(_), Some(_)) => {
+            error!("Cannot specify both --gfa-files and --gfa-list");
+            std::process::exit(1);
+        }
+    };
+    if gfa_files.is_empty() {
+        error!("No GFA files specified");
+        std::process::exit(1);
+    }
+
     let fasta_reader = args.fasta.as_ref().map(|fasta_path| faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
             error!("Failed to open FASTA file: {}", e);
             std::process::exit(1);
@@ -83,7 +120,7 @@ fn main() {
     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
-    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&args.gfa_list, args.temp_dir.as_deref());
+    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref());
 
     // log_memory_usage("after_reading_files");
 
