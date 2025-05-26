@@ -54,7 +54,7 @@ struct Args {
     #[clap(long)]
     fasta: Option<String>,
 
-    /// Working directory for temporary files (default: same as input files)
+    /// Temporary directory for temporary files (default: same as input files)
     #[clap(long, value_parser)]
     temp_dir: Option<String>,
 
