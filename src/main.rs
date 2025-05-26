@@ -1,14 +1,13 @@
 use std::{
     fs::File,
-    io::{self, Write},
+    io::{self, Read, Write, Seek, SeekFrom, BufWriter},
     path::Path,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use clap::Parser;
 use handlegraph::{
-    handle::{Handle, NodeId, Edge},
+    handle::{Handle, NodeId},
     handlegraph::*,
-    mutablehandlegraph::*,
     hashgraph::HashGraph,
 };
 use gfa::{gfa::GFA, parser::GFAParser};
@@ -120,7 +119,12 @@ fn main() {
     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
-    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref());
+    info!("Collecting metadata from {} GFA files", gfa_files.len());
+    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref())
+        .unwrap_or_else(|e| {
+            error!("Failed to read GFA files: {}", e);
+            std::process::exit(1);
+        });
 
     // log_memory_usage("after_reading_files");
 
@@ -133,17 +137,118 @@ fn main() {
         trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
         link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
-    info!("Created {} nodes and {} edges",
-        combined_graph.node_count(), combined_graph.edge_count());
+    info!("Created {} nodes and {} edges", combined_graph.node_count, combined_graph.edges.len());
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&combined_graph, &path_key_ranges, &args.output, args.fill_gaps, &fasta_reader, args.verbose > 1) {
+    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, args.fill_gaps, &fasta_reader, args.verbose > 1) {
         Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
 
     // log_memory_usage("end");
+}
+
+// Compact edge representation using bit-packed orientations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CompactEdge {
+    // Use top 2 bits for orientations, rest for node IDs
+    from: u64, // bit 63: orientation, bits 0-62: node ID
+    to: u64,   // bit 63: orientation, bits 0-62: node ID
+}
+
+impl CompactEdge {
+    const ORIENT_MASK: u64 = 1u64 << 63;
+    const ID_MASK: u64 = !Self::ORIENT_MASK;
+
+    fn new(from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> Self {
+        let from = from_id | (if from_rev { Self::ORIENT_MASK } else { 0 });
+        let to = to_id | (if to_rev { Self::ORIENT_MASK } else { 0 });
+        CompactEdge { from, to }
+    }
+
+    fn from_id(&self) -> u64 { self.from & Self::ID_MASK }
+    fn from_rev(&self) -> bool { (self.from & Self::ORIENT_MASK) != 0 }
+    fn to_id(&self) -> u64 { self.to & Self::ID_MASK }
+    fn to_rev(&self) -> bool { (self.to & Self::ORIENT_MASK) != 0 }
+}
+
+// Sequence storage with memory mapping
+struct SequenceStore {
+    sequences_file: File,
+    offsets: Vec<(u64, u32)>, // (offset, length) for each node
+}
+
+impl SequenceStore {
+    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+        let temp_file = if let Some(dir) = temp_dir {
+            NamedTempFile::new_in(dir)?
+        } else {
+            NamedTempFile::new()?
+        };
+        
+        let sequences_file = temp_file.into_file();
+        
+        Ok(SequenceStore {
+            sequences_file,
+            offsets: Vec::new(),
+        })
+    }
+
+    fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
+        let offset = self.sequences_file.seek(SeekFrom::End(0))?;
+        self.sequences_file.write_all(seq)?;
+        
+        let idx = self.offsets.len();
+        self.offsets.push((offset, seq.len() as u32));
+        Ok(idx)
+    }
+
+    fn get_sequence(&mut self, idx: usize) -> io::Result<Vec<u8>> {
+        if idx >= self.offsets.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid sequence index"));
+        }
+        
+        let (offset, length) = self.offsets[idx];
+        let mut buffer = vec![0u8; length as usize];
+        
+        self.sequences_file.seek(SeekFrom::Start(offset))?;
+        self.sequences_file.read_exact(&mut buffer)?;
+        
+        Ok(buffer)
+    }
+}
+
+// Simplified graph structure
+struct CompactGraph {
+    node_count: u64,
+    edges: FxHashSet<CompactEdge>,
+    sequence_store: SequenceStore,
+}
+
+impl CompactGraph {
+    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+        Ok(CompactGraph {
+            node_count: 0,
+            edges: FxHashSet::default(),
+            sequence_store: SequenceStore::new(temp_dir)?,
+        })
+    }
+
+    fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
+        let node_id = self.node_count;
+        self.sequence_store.add_sequence(seq)?;
+        self.node_count += 1;
+        Ok(node_id)
+    }
+
+    fn add_edge(&mut self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) {
+        self.edges.insert(CompactEdge::new(from_id, from_rev, to_id, to_rev));
+    }
+
+    fn get_sequence(&mut self, node_id: u64) -> io::Result<Vec<u8>> {
+        self.sequence_store.get_sequence(node_id as usize)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -171,12 +276,9 @@ impl RangeInfo {
 fn read_gfa_files(
     gfa_list: &[String],
     temp_dir: Option<&str>,
-) -> (HashGraph, FxHashMap<String, Vec<RangeInfo>>) {
-    let mut combined_graph = HashGraph::new();
+) -> io::Result<(CompactGraph, FxHashMap<String, Vec<RangeInfo>>)> {
+    let mut combined_graph = CompactGraph::new(temp_dir)?;
     let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
-    let mut id_translations = Vec::with_capacity(gfa_list.len());
-
-    info!("Reading {} GFA files", gfa_list.len());
 
     // Process each GFA file
     let parser = GFAParser::new();
@@ -185,23 +287,24 @@ fn read_gfa_files(
         let block_graph = HashGraph::from_gfa(&gfa);
 
         // Record the id translation for this block
-        let id_translation = NodeId::from(combined_graph.node_count());
-        id_translations.push(id_translation);
+        let id_translation = NodeId::from(combined_graph.node_count);
 
         // Add nodes with translated IDs
         for handle in block_graph.handles() {
             let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            let new_id = id_translation + handle.id().into();
-            combined_graph.create_handle(&sequence, new_id);
+            combined_graph.add_node(&sequence).unwrap();
         }
 
         // Add edges with translated IDs
         for edge in block_graph.edges() {
-            let translated_edge = Edge(
-                Handle::pack(id_translation + edge.0.id().into(), edge.0.is_reverse()),
-                Handle::pack(id_translation + edge.1.id().into(), edge.1.is_reverse())
+            let from_id = id_translation + edge.0.id().into();
+            let to_id = id_translation + edge.1.id().into();
+            combined_graph.add_edge(
+                from_id.into(),
+                edge.0.is_reverse(),
+                to_id.into(),
+                edge.1.is_reverse()
             );
-            combined_graph.create_edge(translated_edge);
         }
         
         debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
@@ -246,9 +349,9 @@ fn read_gfa_files(
     }
 
     info!("Collected {} nodes, {} edges, and {} path keys",
-        combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len());
+        combined_graph.node_count, combined_graph.edges.len(), path_key_ranges.len());
 
-    (combined_graph, path_key_ranges)
+    Ok((combined_graph, path_key_ranges))
 }
 
 fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>, temp_dir: Option<&str>) -> io::Result<GFA<usize, ()>> {
@@ -439,13 +542,11 @@ fn sort_and_filter_ranges(
 fn trim_range_overlaps(
     path_key: &str,
     ranges: &mut [RangeInfo],
-    combined_graph: &mut HashGraph,
+    combined_graph: &mut CompactGraph,
     debug: bool
 ) {
     // Trim overlaps
     debug!("  Trimming overlapping ranges");
-
-    let mut next_node_id_value = u64::from(combined_graph.max_node_id()) + 1;
 
     for i in 1..ranges.len() {
         let (left, right) = ranges.split_at_mut(i);
@@ -514,7 +615,7 @@ fn trim_range_overlaps(
                     continue;
                 } else if step_to_split == Some(idx) {
                     // Split node for the single partially overlapping step
-                    let node_seq = combined_graph.sequence(step_handle).collect::<Vec<_>>();
+                    let node_seq = combined_graph.get_sequence(step_handle.id().into()).unwrap();
                     let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
                     let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
                     
@@ -533,10 +634,8 @@ fn trim_range_overlaps(
 
                         // Keep left part
                         let new_seq = node_seq[0..overlap_start_offset].to_vec();
-
-                        let node_id = NodeId::from(next_node_id_value);
-                        next_node_id_value += 1;
-                        let new_node = combined_graph.create_handle(&new_seq, node_id);
+                        let node_id = combined_graph.add_node(&new_seq).unwrap();
+                        let new_node = Handle::pack(NodeId::from(node_id), false);
 
                         new_steps.push(new_node);
                         new_step_ends.push(overlap_start);
@@ -549,10 +648,8 @@ fn trim_range_overlaps(
 
                         // Keep right part
                         let new_seq = node_seq[overlap_end_offset..].to_vec();
-
-                        let node_id = NodeId::from(next_node_id_value);
-                        next_node_id_value += 1;
-                        let new_node = combined_graph.create_handle(&new_seq, node_id);
+                        let node_id = combined_graph.add_node(&new_seq).unwrap();
+                        let new_node = Handle::pack(NodeId::from(node_id), false);
 
                         new_steps.push(new_node);
                         new_step_ends.push(step_end);
@@ -578,9 +675,13 @@ fn trim_range_overlaps(
             for idx in 0..r2.steps.len() {
                 if idx > 0 {
                     let prev_step = r2.steps[idx - 1];
-                    if !combined_graph.has_edge(prev_step, r2.steps[idx]) {
-                        combined_graph.create_edge(Edge(prev_step, r2.steps[idx]));
-                    }
+                    let curr_step = r2.steps[idx];
+                    combined_graph.add_edge(
+                        prev_step.id().into(),
+                        prev_step.is_reverse(),
+                        curr_step.id().into(),
+                        curr_step.is_reverse()
+                    );
                 }
             }
 
@@ -609,7 +710,7 @@ fn trim_range_overlaps(
 fn link_contiguous_ranges(
     path_key: &str,
     ranges: &mut [RangeInfo],
-    combined_graph: &mut HashGraph,
+    combined_graph: &mut CompactGraph,
     debug: bool
 ) {
     // Trim overlaps
@@ -625,10 +726,13 @@ fn link_contiguous_ranges(
             // Get last handle from previous range and first handle from current range
             if let (Some(&last_handle), Some(&first_handle)) = (r1.steps.last(), r2.steps.first()) {
                 // Create edge if it doesn't exist
-                if !combined_graph.has_edge(last_handle, first_handle) {
-                    combined_graph.create_edge(Edge(last_handle, first_handle));
-                    debug!("    Created edge between contiguous ranges at position {}", r1.end);
-                }
+                combined_graph.add_edge(
+                    last_handle.id().into(),
+                    last_handle.is_reverse(),
+                    first_handle.id().into(),
+                    first_handle.is_reverse()
+                );
+                debug!("    Created edge between contiguous ranges at position {}", r1.end);
             }
         }
     }
@@ -757,12 +861,11 @@ fn link_contiguous_ranges(
 // }
 
 fn mark_nodes_for_removal(
-    graph: &HashGraph,
+    node_count: u64,
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>
 ) -> BitVec {
     // Create a bitvector with all nodes initially marked for removal
-    let max_node_id = u64::from(graph.max_node_id());
-    let mut nodes_to_remove = bitvec![1; max_node_id as usize + 1];
+    let mut nodes_to_remove = bitvec![1; node_count as usize];
     
     // Mark nodes used in path ranges as not to be removed (set bit to 0)
     for ranges in path_key_ranges.values() {
@@ -777,33 +880,33 @@ fn mark_nodes_for_removal(
 }
 
 fn write_graph_to_gfa(
-    graph: &HashGraph, 
+    combined_graph: &mut CompactGraph, 
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
     output_path: &str,
     fill_gaps: u8,
     fasta_reader: &Option<faidx::Reader>,
     debug: bool
 ) -> std::io::Result<()> {
-    info!("Marking unused nodes");
-    let nodes_to_remove : BitVec = mark_nodes_for_removal(graph, path_key_ranges);    
+info!("Marking unused nodes");
+    let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
-    let mut file = File::create(output_path)?;
+    let mut file = BufWriter::new(File::create(output_path)?);
     
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
-    
-    // Write nodes by exluding marked ones and create the id_mapping
+
+    // Write nodes by excluding marked ones and create the id_mapping
     info!("Writing used nodes by compacting their IDs");
-    let max_id = graph.node_count();
+    let max_id = combined_graph.node_count as usize;
     let mut id_mapping = vec![0; max_id + 1];
-    let mut new_id = 1; // Start from 1
-    for handle in graph.handles() {
-        let node_id = usize::from(handle.id());
-        if !nodes_to_remove[node_id] {
-            id_mapping[node_id] = new_id;
+    let mut new_id = 1;
+    
+    for node_id in 0..combined_graph.node_count {
+        if !nodes_to_remove[node_id as usize] {
+            id_mapping[node_id as usize] = new_id;
             
-            let sequence = graph.sequence(handle).collect::<Vec<_>>();
+            let sequence = combined_graph.get_sequence(node_id)?;
             let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| String::from("N"));
             writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
             
@@ -811,17 +914,17 @@ fn write_graph_to_gfa(
         }
     }
     
-    // Write edges by excluding those connected to marked nodes
     info!("Writing edges connecting used nodes");
-    for edge in graph.edges() {
-        if !nodes_to_remove[u64::from(edge.0.id()) as usize] && 
-           !nodes_to_remove[u64::from(edge.1.id()) as usize] 
-        {
-            let from_id = id_mapping[u64::from(edge.0.id()) as usize];
-            let to_id = id_mapping[u64::from(edge.1.id()) as usize];
-            let from_orient = if edge.0.is_reverse() { "-" } else { "+" };
-            let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
-            writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
+    for edge in &combined_graph.edges {
+        let from_id = edge.from_id() as usize;
+        let to_id = edge.to_id() as usize;
+        
+        if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
+            let from_mapped = id_mapping[from_id];
+            let to_mapped = id_mapping[to_id];
+            let from_orient = if edge.from_rev() { "-" } else { "+" };
+            let to_orient = if edge.to_rev() { "-" } else { "+" };
+            writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_mapped, from_orient, to_mapped, to_orient)?;
         }
     }
 
@@ -1006,11 +1109,12 @@ fn write_graph_to_gfa(
         info!("Filled {} middle gaps", middle_gaps);
     }
 
+    file.flush()?;
     Ok(())
 }
 
 fn create_gap_node(
-    file: &mut File,
+    file: &mut BufWriter<File>,
     gap_range: (usize, usize),
     path_key: &str,
     fasta_reader: &Option<faidx::Reader>,
