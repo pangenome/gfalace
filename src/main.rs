@@ -268,12 +268,14 @@ struct RangeInfo {
 impl RangeInfo {
     /// Returns true if this range is immediately followed by another range
     /// with no gap between them
+    #[inline]
     fn is_contiguous_with(&self, other: &Self) -> bool {
         self.end == other.start
     }
 
     /// Returns true if this range overlaps with another range
     /// Two ranges overlap if one starts before the other ends
+    #[inline]
     fn overlaps_with(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }
@@ -294,6 +296,7 @@ fn read_gfa_files(
 
         // Create a translation map for this GFA file
         let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+        id_translation.reserve(block_graph.node_count());
 
         // Add nodes and build translation map
         for handle in block_graph.handles() {
