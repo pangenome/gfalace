@@ -134,8 +134,8 @@ fn main() {
         debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
 
         sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
-        //trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
-        //link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
+        trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
+        link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
     info!("Created {} nodes and {} edges", combined_graph.node_count, combined_graph.edges.len());
 
@@ -223,8 +223,7 @@ impl SequenceStore {
 struct CompactGraph {
     node_count: u64,
     edges: FxHashSet<CompactEdge>,
-    sequence_store: SequenceStore,
-    node_id_to_seq_idx: FxHashMap<u64, usize>, // Map node IDs to sequence indices
+    sequence_store: SequenceStore
 }
 
 impl CompactGraph {
@@ -232,24 +231,14 @@ impl CompactGraph {
         Ok(CompactGraph {
             node_count: 0,
             edges: FxHashSet::default(),
-            sequence_store: SequenceStore::new(temp_dir)?,
-            node_id_to_seq_idx: FxHashMap::default(),
+            sequence_store: SequenceStore::new(temp_dir)?
         })
     }
 
-    fn add_node_with_id(&mut self, seq: &[u8], node_id: u64) -> io::Result<()> {
-        let seq_idx = self.sequence_store.add_sequence(seq)?;
-        self.node_id_to_seq_idx.insert(node_id, seq_idx);
-        if node_id > self.node_count {
-            self.node_count = node_id;
-        }
-        Ok(())
-    }
-
     fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
-        let node_id = self.node_count + 1;
-        self.add_node_with_id(seq, node_id)?;
-        Ok(node_id)
+        self.sequence_store.add_sequence(seq)?;
+        self.node_count += 1;
+        Ok(self.node_count) // Return the actual node ID (1-based as per handlegraph convention)
     }
 
     fn add_edge(&mut self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) {
@@ -264,12 +253,7 @@ impl CompactGraph {
     }
 
     fn get_sequence(&mut self, node_id: u64) -> io::Result<Vec<u8>> {
-        if let Some(&seq_idx) = self.node_id_to_seq_idx.get(&(node_id)) {
-            self.sequence_store.get_sequence(seq_idx)
-        } else {
-            Err(io::Error::new(io::ErrorKind::InvalidInput, 
-                format!("Node {} not found", node_id)))
-        }
+        self.sequence_store.get_sequence((node_id - 1) as usize) // Convert 1-based to 0-based
     }
 }
 
@@ -308,20 +292,20 @@ fn read_gfa_files(
         let gfa = read_gfa(gfa_path, &parser, temp_dir).unwrap();
         let block_graph = HashGraph::from_gfa(&gfa);
 
-        // Record the id translation for this block
-        let id_translation = NodeId::from(combined_graph.node_count);
+        // Create a translation map for this GFA file
+        let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
-        // Add nodes with translated IDs
+        // Add nodes and build translation map
         for handle in block_graph.handles() {
             let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            let new_id = id_translation + handle.id().into();
-            combined_graph.add_node_with_id(&sequence, new_id.into())?;
+            let new_node_id = combined_graph.add_node(&sequence)?;
+            id_translation.insert(handle.id(), NodeId::from(new_node_id));
         }
 
         // Add edges with translated IDs
         for edge in block_graph.edges() {
-            let from_id = id_translation + edge.0.id().into();
-            let to_id = id_translation + edge.1.id().into();
+            let from_id = id_translation[&edge.0.id()];
+            let to_id = id_translation[&edge.1.id()];
             combined_graph.add_edge(
                 from_id.into(),
                 edge.0.is_reverse(),
@@ -330,7 +314,8 @@ fn read_gfa_files(
             );
         }
         
-        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
+        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", 
+            gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
 
         // Process paths and collect ranges with their steps
         for (_path_id, path_ref) in block_graph.paths.iter() {
@@ -343,7 +328,8 @@ fn read_gfa_files(
                 let mut cumulative_pos = start;
 
                 for step in path_ref.nodes.iter() {
-                    let translated_id = id_translation + step.id().into();
+                    // Use the translation map to get the new node ID
+                    let translated_id = id_translation[&step.id()];
                     let translated_step = Handle::pack(translated_id, step.is_reverse());
                     translated_steps.push(translated_step);
 
@@ -356,14 +342,14 @@ fn read_gfa_files(
 
                 if !translated_steps.is_empty() {
                     path_key_ranges.entry(sample_hap_name)
-                    .or_default()
-                    .push(RangeInfo { 
-                        start, 
-                        end, 
-                        gfa_id,
-                        steps: translated_steps,
-                        step_ends,
-                    });
+                        .or_default()
+                        .push(RangeInfo { 
+                            start, 
+                            end, 
+                            gfa_id,
+                            steps: translated_steps,
+                            step_ends,
+                        });
                 } else {
                     warn!("    Path '{}' has no steps", path_name);
                 }
