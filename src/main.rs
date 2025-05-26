@@ -134,8 +134,8 @@ fn main() {
         debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
 
         sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
-        trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
-        link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
+        //trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
+        //link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
     }
     info!("Created {} nodes and {} edges", combined_graph.node_count, combined_graph.edges.len());
 
@@ -224,6 +224,7 @@ struct CompactGraph {
     node_count: u64,
     edges: FxHashSet<CompactEdge>,
     sequence_store: SequenceStore,
+    node_id_to_seq_idx: FxHashMap<u64, usize>, // Map node IDs to sequence indices
 }
 
 impl CompactGraph {
@@ -232,13 +233,22 @@ impl CompactGraph {
             node_count: 0,
             edges: FxHashSet::default(),
             sequence_store: SequenceStore::new(temp_dir)?,
+            node_id_to_seq_idx: FxHashMap::default(),
         })
     }
 
+    fn add_node_with_id(&mut self, seq: &[u8], node_id: u64) -> io::Result<()> {
+        let seq_idx = self.sequence_store.add_sequence(seq)?;
+        self.node_id_to_seq_idx.insert(node_id, seq_idx);
+        if node_id > self.node_count {
+            self.node_count = node_id;
+        }
+        Ok(())
+    }
+
     fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
-        let node_id = self.node_count;
-        self.sequence_store.add_sequence(seq)?;
-        self.node_count += 1;
+        let node_id = self.node_count + 1;
+        self.add_node_with_id(seq, node_id)?;
         Ok(node_id)
     }
 
@@ -246,8 +256,20 @@ impl CompactGraph {
         self.edges.insert(CompactEdge::new(from_id, from_rev, to_id, to_rev));
     }
 
+    fn has_edge(&self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> bool {
+        // Check for the edge in both directions since handlegraph edges are bidirectional
+        let edge1 = CompactEdge::new(from_id, from_rev, to_id, to_rev);
+        let edge2 = CompactEdge::new(to_id, !to_rev, from_id, !from_rev);
+        self.edges.contains(&edge1) || self.edges.contains(&edge2)
+    }
+
     fn get_sequence(&mut self, node_id: u64) -> io::Result<Vec<u8>> {
-        self.sequence_store.get_sequence(node_id as usize)
+        if let Some(&seq_idx) = self.node_id_to_seq_idx.get(&(node_id)) {
+            self.sequence_store.get_sequence(seq_idx)
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, 
+                format!("Node {} not found", node_id)))
+        }
     }
 }
 
@@ -292,7 +314,8 @@ fn read_gfa_files(
         // Add nodes with translated IDs
         for handle in block_graph.handles() {
             let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            combined_graph.add_node(&sequence).unwrap();
+            let new_id = id_translation + handle.id().into();
+            combined_graph.add_node_with_id(&sequence, new_id.into())?;
         }
 
         // Add edges with translated IDs
@@ -676,12 +699,23 @@ fn trim_range_overlaps(
                 if idx > 0 {
                     let prev_step = r2.steps[idx - 1];
                     let curr_step = r2.steps[idx];
-                    combined_graph.add_edge(
+                    // Create edge if it doesn't exist
+                    if !combined_graph.has_edge(
                         prev_step.id().into(),
                         prev_step.is_reverse(),
                         curr_step.id().into(),
                         curr_step.is_reverse()
-                    );
+                    ) {
+                        debug!("      Creating edge between steps: {} -> {}", prev_step.id(), curr_step.id());
+
+                        combined_graph.add_edge(
+                            prev_step.id().into(),
+                            prev_step.is_reverse(),
+                            curr_step.id().into(),
+                            curr_step.is_reverse()
+                        );
+                    }
+
                 }
             }
 
@@ -726,13 +760,21 @@ fn link_contiguous_ranges(
             // Get last handle from previous range and first handle from current range
             if let (Some(&last_handle), Some(&first_handle)) = (r1.steps.last(), r2.steps.first()) {
                 // Create edge if it doesn't exist
-                combined_graph.add_edge(
+                if !combined_graph.has_edge(
                     last_handle.id().into(),
                     last_handle.is_reverse(),
                     first_handle.id().into(),
                     first_handle.is_reverse()
-                );
-                debug!("    Created edge between contiguous ranges at position {}", r1.end);
+                ) {
+                    debug!("    Creating edge between contiguous ranges at position {}: {} -> {}", r1.end, last_handle.id(), first_handle.id());
+
+                    combined_graph.add_edge(
+                        last_handle.id().into(),
+                        last_handle.is_reverse(),
+                        first_handle.id().into(),
+                        first_handle.is_reverse()
+                    );
+                }
             }
         }
     }
@@ -865,7 +907,7 @@ fn mark_nodes_for_removal(
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>
 ) -> BitVec {
     // Create a bitvector with all nodes initially marked for removal
-    let mut nodes_to_remove = bitvec![1; node_count as usize];
+    let mut nodes_to_remove = bitvec![1; node_count as usize + 1]; // +1 to account for 0-indexing
     
     // Mark nodes used in path ranges as not to be removed (set bit to 0)
     for ranges in path_key_ranges.values() {
@@ -900,9 +942,9 @@ info!("Marking unused nodes");
     info!("Writing used nodes by compacting their IDs");
     let max_id = combined_graph.node_count as usize;
     let mut id_mapping = vec![0; max_id + 1];
-    let mut new_id = 1;
+    let mut new_id = 1; // Start from 1
     
-    for node_id in 0..combined_graph.node_count {
+    for node_id in 1..=combined_graph.node_count {
         if !nodes_to_remove[node_id as usize] {
             id_mapping[node_id as usize] = new_id;
             
@@ -977,7 +1019,7 @@ info!("Marking unused nodes");
             }
             
             // Print final merged range
-            debug!("  Merged range: start={}, end={}", 
+            debug!("  Final merged range: start={}, end={}", 
                 current_start, current_end);
         }
 
@@ -1083,7 +1125,7 @@ info!("Marking unused nodes");
                                     && start_range.start == 0
                                     && fasta_reader.as_ref()
                                         .map(|reader| reader.fetch_seq_len(path_key))
-                                        .map_or(true, |total_len| end_range.end >= total_len as usize);
+                                        .map_or(true, |total_len| end_range.end == total_len as usize);
 
                 let path_name = if is_full_path {
                     path_key.to_string()
