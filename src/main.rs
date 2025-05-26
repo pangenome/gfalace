@@ -174,7 +174,7 @@ fn read_gfa_files(
 ) -> (HashGraph, FxHashMap<String, Vec<RangeInfo>>) {
     let mut combined_graph = HashGraph::new();
     let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
-    let mut id_translations = Vec::new();
+    let mut id_translations = Vec::with_capacity(gfa_list.len());
 
     info!("Reading {} GFA files", gfa_list.len());
 
