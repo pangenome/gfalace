@@ -1151,7 +1151,6 @@ mod tests {
             end,
             //gfa_id,
             steps: vec![],            // Empty steps for testing
-            step_ends: vec![],   // Empty positions for testing
         }
     }
 
