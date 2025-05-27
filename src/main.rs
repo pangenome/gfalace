@@ -261,7 +261,7 @@ impl CompactGraph {
 struct RangeInfo {
     start: usize,
     end: usize,
-    gfa_id: usize,
+    //gfa_id: usize,            // GFA file ID this range belongs to
     steps: Vec<Handle>,     // Path steps for this range
     step_ends: Vec<usize>,  // End positions of each step (start is either the range start (for index 0) or the previous step's end position)
 }
@@ -349,7 +349,7 @@ fn read_gfa_files(
                         .push(RangeInfo { 
                             start, 
                             end, 
-                            gfa_id,
+                            //gfa_id,
                             steps: translated_steps,
                             step_ends,
                         });
@@ -466,7 +466,8 @@ fn sort_and_filter_ranges(
     if debug {
         debug!("  Path key '{}' at the beginning", path_key);
         for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
         }
 
         debug!("  Removing redundant ranges");
@@ -546,7 +547,8 @@ fn sort_and_filter_ranges(
     if debug {
         debug!("  Path key '{}' without redundancy", path_key);
         for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
         }
     }
 }
@@ -725,7 +727,8 @@ fn trim_range_overlaps(
     if debug {
         debug!("  Path key '{}' without overlaps", path_key);
         for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
         }
     }
 }
@@ -771,7 +774,8 @@ fn link_contiguous_ranges(
     if debug {
         debug!("  Path key '{}' without overlaps", path_key);
         for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
         }
     }
 }
@@ -1210,11 +1214,11 @@ mod tests {
     use super::*;
 
     // Helper function to create a simple RangeInfo for testing
-    fn create_range_info(start: usize, end: usize, gfa_id: usize) -> RangeInfo {
+    fn create_range_info(start: usize, end: usize, _gfa_id: usize) -> RangeInfo {
         RangeInfo {
             start,
             end,
-            gfa_id,
+            //gfa_id,
             steps: vec![],            // Empty steps for testing
             step_ends: vec![],   // Empty positions for testing
         }
@@ -1226,78 +1230,78 @@ mod tests {
         let test_cases = vec![
             // Test case 1: Basic containment
             (
-                vec![(10, 50, 0), (20, 30, 1)],  // Input ranges (start, end, gfa_id)
-                vec![(10, 50, 0)],               // Expected result
+                vec![(10, 50), (20, 30)],  // Input ranges (start, end)
+                vec![(10, 50)],            // Expected result
                 "Basic containment"
             ),
             
             // Test case 2: No containment
             (
-                vec![(10, 20, 0), (30, 40, 1)],
-                vec![(10, 20, 0), (30, 40, 1)],
+                vec![(10, 20), (30, 40)],
+                vec![(10, 20), (30, 40)],
                 "No containment"
             ),
             
             // Test case 3: Multiple contained ranges
             (
-                vec![(10, 100, 0), (20, 30, 1), (40, 50, 2), (60, 70, 3)],
-                vec![(10, 100, 0)],
+                vec![(10, 100), (20, 30), (40, 50), (60, 70)],
+                vec![(10, 100)],
                 "Multiple contained ranges"
             ),
             
             // Test case 4: Identical ranges
             (
-                vec![(10, 20, 0), (10, 20, 1)],
-                vec![(10, 20, 0)],
+                vec![(10, 20), (10, 20)],
+                vec![(10, 20)],
                 "Identical ranges"
             ),
             
             // Test case 5: Nested containment
             (
-                vec![(10, 100, 0), (20, 80, 1), (30, 40, 2)],
-                vec![(10, 100, 0)],
+                vec![(10, 100), (20, 80), (30, 40)],
+                vec![(10, 100)],
                 "Nested containment"
             ),
             
             // Test case 6: Partial overlap (should keep both)
             (
-                vec![(10, 30, 0), (20, 40, 1)],
-                vec![(10, 30, 0), (20, 40, 1)],
+                vec![(10, 30), (20, 40)],
+                vec![(10, 30), (20, 40)],
                 "Partial overlap"
             ),
             
             // Test case 7: Edge cases - touching ranges
             (
-                vec![(10, 20, 0), (20, 30, 1)],
-                vec![(10, 20, 0), (20, 30, 1)],
+                vec![(10, 20), (20, 30)],
+                vec![(10, 20), (20, 30)],
                 "Touching ranges"
             ),
 
             // Test case 8: Overlapping ranges from same GFA
             (
-                vec![(0, 11742, 0), (9714, 13000, 1), (11000, 19000, 1)],
-                vec![(0, 11742, 0), (11000, 19000, 1)],
+                vec![(0, 11742), (9714, 13000), (11000, 19000)],
+                vec![(0, 11742), (11000, 19000)],
                 "Overlapping ranges from same GFA"
             ),
 
             // Test case 9: Overlapping ranges with different GFA IDs
             (
-                vec![(0, 11742, 0), (9714, 13000, 1), (11000, 19000, 2)],
-                vec![(0, 11742, 0), (11000, 19000, 2)],
+                vec![(0, 11742), (9714, 13000), (11000, 19000)],
+                vec![(0, 11742), (11000, 19000)],
                 "Overlapping ranges"
             ),
 
             // Test case 10: Overlapping ranges with different GFA IDs 2
             (
-                vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
-                vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
+                vec![(0, 10), (8, 20), (15, 30)],
+                vec![(0, 10), (8, 20), (15, 30)],
                 "Overlapping ranges"
             ),
 
             // Test case 11: Overlapping ranges with different GFA IDs 3
             (
-                vec![(8000, 11000, 0), (9694, 12313, 1), (10908, 13908, 2)],
-                vec![(8000, 11000, 0), (10908, 13908, 2)],
+                vec![(8000, 11000), (9694, 12313), (10908, 13908)],
+                vec![(8000, 11000), (10908, 13908)],
                 "Overlapping ranges"
             ),
         ];
@@ -1309,7 +1313,7 @@ mod tests {
             // Create input ranges
             let mut ranges: Vec<RangeInfo> = input_ranges
                 .iter()
-                .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
+                .map(|(start, end)| create_range_info(*start, *end))
                 .collect();
 
             // Sort ranges by start position
@@ -1368,7 +1372,7 @@ mod tests {
             // Create expected ranges
             let expected: Vec<RangeInfo> = expected_ranges
                 .iter()
-                .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
+                .map(|(start, end)| create_range_info(*start, *end))
                 .collect();
 
             // Compare results
@@ -1381,8 +1385,8 @@ mod tests {
 
             for (i, (result, expected)) in ranges.iter().zip(expected.iter()).enumerate() {
                 assert_eq!(
-                    (result.start, result.end, result.gfa_id),
-                    (expected.start, expected.end, expected.gfa_id),
+                    (result.start, result.end),
+                    (expected.start, expected.end),
                     "Test case '{}': Mismatch at position {}",
                     case_name,
                     i
