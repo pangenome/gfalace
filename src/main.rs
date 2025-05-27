@@ -34,6 +34,20 @@ use rust_htslib::faidx;
 //     info!("Memory usage at {}: {:.2} MB", stage, memory_mb);
 // }
 
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&base| match base {
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'U' | b'u' => b'A',
+            _ => b'N',
+        })
+        .collect()
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
@@ -252,8 +266,13 @@ impl CompactGraph {
         self.edges.contains(&edge1) || self.edges.contains(&edge2)
     }
 
-    fn get_sequence(&mut self, node_id: u64) -> io::Result<Vec<u8>> {
-        self.sequence_store.get_sequence((node_id - 1) as usize) // Convert 1-based to 0-based
+    fn get_sequence(&mut self, handle: Handle) -> io::Result<Vec<u8>> {
+        let seq = self.sequence_store.get_sequence((u64::from(handle.id()) - 1) as usize)?;
+        Ok(if handle.is_reverse() {
+            reverse_complement(&seq)
+        } else {
+            seq
+        })
     }
 }
 
@@ -580,7 +599,7 @@ fn trim_range_overlaps(
 
             for (idx, &step_handle) in r2.steps.iter().enumerate() {
                 let step_start = cumulative_pos;
-                let node_seq = combined_graph.get_sequence(step_handle.id().into()).unwrap();
+                let node_seq = combined_graph.get_sequence(step_handle).unwrap();
                 let node_length = node_seq.len();
                 cumulative_pos += node_length;
                 let step_end = cumulative_pos;
@@ -627,7 +646,7 @@ fn trim_range_overlaps(
             // Iterate over the original steps using incrementally computed positions
             for (idx, &step_handle) in r2.steps.iter().enumerate() {
                 let step_start = cumulative_pos;
-                let node_seq = combined_graph.get_sequence(step_handle.id().into()).unwrap();
+                let node_seq = combined_graph.get_sequence(step_handle).unwrap();
                 let node_length = node_seq.len();
                 cumulative_pos += node_length;
                 let step_end = cumulative_pos;
@@ -929,7 +948,7 @@ fn write_graph_to_gfa(
     fasta_reader: &Option<faidx::Reader>,
     debug: bool
 ) -> std::io::Result<()> {
-info!("Marking unused nodes");
+    info!("Marking unused nodes");
     let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
@@ -948,7 +967,7 @@ info!("Marking unused nodes");
         if !nodes_to_remove[node_id as usize] {
             id_mapping[node_id as usize] = new_id;
             
-            let sequence = combined_graph.get_sequence(node_id)?;
+            let sequence = combined_graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
             let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| String::from("N"));
             writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
             
