@@ -11,6 +11,7 @@ use bitvec::{bitvec, prelude::BitVec};
 use tempfile::NamedTempFile;
 use log::{debug, info, warn, error};
 use rust_htslib::faidx;
+use niffler::compression::Format;
 
 // use std::process::Command;
 
@@ -59,6 +60,10 @@ struct Args {
     #[clap(short, long, value_parser)]
     output: String,
 
+    /// Output compression format: none, gzip (.gz), bgzip (.bgz), or zstd (.zst)
+    #[clap(long, value_parser, default_value = "auto")]
+    compress: String,
+
     /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --fasta for end gaps)
     #[clap(long, default_value = "0")]
     fill_gaps: u8,
@@ -76,6 +81,31 @@ struct Args {
     verbose: u8,
 }
 
+fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
+    match compress_arg.to_lowercase().as_str() {
+        "none" => Format::No,
+        "gzip" | "gz" => Format::Gzip,
+        "bgzip" | "bgz" => Format::Bzip,
+        "zstd" | "zst" => Format::Zstd,
+        "auto" => {
+            // Auto-detect based on file extension
+            if output_path.ends_with(".gz") {
+                Format::Gzip
+            } else if output_path.ends_with(".bgz") {
+                Format::Bzip
+            } else if output_path.ends_with(".zst") {
+                Format::Zstd
+            } else {
+                Format::No
+            }
+        }
+        _ => {
+            warn!("Unsupported compression format '{}', using none", compress_arg);
+            Format::No
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -87,6 +117,9 @@ fn main() {
         _ => log::LevelFilter::Debug,
     })
     .init();
+
+    // Determine compression format
+    let compression_format = get_compression_format(&args.compress, &args.output);
 
     // Get the list of GFA files
     let gfa_files = match (args.gfa_files, args.gfa_list) {
@@ -151,8 +184,8 @@ fn main() {
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, args.fill_gaps, &fasta_reader, args.verbose > 1) {
-        Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
+    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_reader, args.verbose > 1) {
+        Ok(_) => info!("Successfully wrote the combined graph to {} ({:?} format)", args.output, compression_format),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
 
@@ -849,6 +882,7 @@ fn write_graph_to_gfa(
     combined_graph: &mut CompactGraph, 
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
     output_path: &str,
+    compression_format: Format,
     fill_gaps: u8,
     fasta_reader: &Option<faidx::Reader>,
     debug: bool
@@ -857,7 +891,14 @@ fn write_graph_to_gfa(
     let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
     debug!("Marked {} nodes", nodes_to_remove.count_ones());
     
-    let mut file = BufWriter::new(File::create(output_path)?);
+    // Create the output file with niffler for compression support
+    let output_file = File::create(output_path)?;
+    let writer: Box<dyn Write> = niffler::get_writer(
+        Box::new(output_file),
+        compression_format,
+        niffler::compression::Level::Six,
+    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let mut file = BufWriter::new(writer);
     
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
@@ -1079,8 +1120,8 @@ fn write_graph_to_gfa(
     Ok(())
 }
 
-fn create_gap_node(
-    file: &mut BufWriter<File>,
+fn create_gap_node<W: Write>(
+    file: &mut BufWriter<W>,
     gap_range: (usize, usize),
     path_key: &str,
     fasta_reader: &Option<faidx::Reader>,

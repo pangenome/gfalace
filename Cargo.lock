@@ -86,16 +86,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
-name = "bgzip"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b64fd8980fb64af5951bc05de7772b598150a6f7eac42ec17f73e8489915f99b"
-dependencies = [
- "flate2",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "bio-types"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -790,7 +780,6 @@ version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e84f25af5326bacf3cbc3b9d2586d096426b10c889050cab891f89c9cb65932"
 dependencies = [
- "bgzip",
  "bzip2",
  "cfg-if",
  "flate2",
