@@ -1214,7 +1214,7 @@ mod tests {
     use super::*;
 
     // Helper function to create a simple RangeInfo for testing
-    fn create_range_info(start: usize, end: usize, _gfa_id: usize) -> RangeInfo {
+    fn create_range_info(start: usize, end: usize) -> RangeInfo {
         RangeInfo {
             start,
             end,
