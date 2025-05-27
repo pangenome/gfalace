@@ -1,16 +1,12 @@
 use std::{
     fs::File,
-    io::{self, Read, Write, Seek, SeekFrom, BufWriter},
-    path::Path,
+    io::{self, Read, Write, Seek, SeekFrom, BufWriter, BufReader, BufRead},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use clap::Parser;
 use handlegraph::{
     handle::{Handle, NodeId},
-    handlegraph::*,
-    hashgraph::HashGraph,
 };
-use gfa::{gfa::GFA, parser::GFAParser};
 use bitvec::{bitvec, prelude::BitVec};
 use tempfile::NamedTempFile;
 use log::{debug, info, warn, error};
@@ -310,69 +306,149 @@ fn read_gfa_files(
     let mut num_path_range_steps = 0;
 
     // Process each GFA file
-    let parser = GFAParser::new();
     for (gfa_id, gfa_path) in gfa_list.iter().enumerate() {
-        let gfa = read_gfa(gfa_path, &parser, temp_dir).unwrap();
-        let block_graph = HashGraph::from_gfa(&gfa);
-
+        let reader = get_gfa_reader(gfa_path)?;
+        
         // Create a translation map for this GFA file
         let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
-        id_translation.reserve(block_graph.node_count());
-
-        // Add nodes and build translation map
-        for handle in block_graph.handles() {
-            let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            let new_node_id = combined_graph.add_node(&sequence)?;
-            id_translation.insert(handle.id(), NodeId::from(new_node_id));
-        }
-
-        // Add edges with translated IDs
-        for edge in block_graph.edges() {
-            let from_id = id_translation[&edge.0.id()];
-            let to_id = id_translation[&edge.1.id()];
-            combined_graph.add_edge(
-                from_id.into(),
-                edge.0.is_reverse(),
-                to_id.into(),
-                edge.1.is_reverse()
-            );
-        }
+        let mut temp_edges: Vec<CompactEdge> = Vec::new();
         
-        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", 
-            gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
-
-        // Process paths and collect ranges with their steps
-        for (_path_id, path_ref) in block_graph.paths.iter() {
-            let path_name = String::from_utf8_lossy(&path_ref.name);
+        let mut node_count = 0;
+        let mut edge_count = 0;
+        
+        // Read GFA file line by line
+        for line in reader.lines() {
+            let line = line?;
+            let line = line.trim();
             
-            if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
-                // Get the path steps and translate their IDs
-                let mut translated_steps = Vec::new();
-
-                for step in path_ref.nodes.iter() {
-                    // Use the translation map to get the new node ID
-                    let translated_id = id_translation[&step.id()];
-                    let translated_step = Handle::pack(translated_id, step.is_reverse());
-                    translated_steps.push(translated_step);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.is_empty() {
+                continue;
+            }
+            
+            match fields[0] {
+                "S" => {
+                    // Segment line: S <sid> <seq> [<tag>]*
+                    if fields.len() < 3 {
+                        warn!("Invalid S line: {}", line);
+                        continue;
+                    }
+                    
+                    let node_id: u64 = fields[1].parse().unwrap_or_else(|_| {
+                        panic!("Invalid node ID: {}", fields[1]);
+                    });
+                    let sequence = fields[2].as_bytes();
+                    
+                    let new_node_id = combined_graph.add_node(sequence)?;
+                    id_translation.insert(NodeId::from(node_id), NodeId::from(new_node_id));
+                    node_count += 1;
                 }
-
-                if !translated_steps.is_empty() {
-                    num_path_ranges += 1;
-                    num_path_range_steps += translated_steps.len();
-
-                    path_key_ranges.entry(sample_hap_name)
-                        .or_default()
-                        .push(RangeInfo { 
-                            start, 
-                            end, 
-                            //gfa_id,
-                            steps: translated_steps,
-                        });
-                } else {
-                    warn!("    Path '{}' has no steps", path_name);
+                
+                "L" => {
+                    // Link line: L <sid1> <orient1> <sid2> <orient2> <overlap>
+                    if fields.len() < 6 {
+                        warn!("Invalid L line: {}", line);
+                        continue;
+                    }
+                    
+                    let from_id: u64 = fields[1].parse().unwrap_or_else(|_| {
+                        panic!("Invalid from node ID: {}", fields[1]);
+                    });
+                    let from_rev = fields[2] == "-";
+                    let to_id: u64 = fields[3].parse().unwrap_or_else(|_| {
+                        panic!("Invalid to node ID: {}", fields[3]);
+                    });
+                    let to_rev = fields[4] == "-";
+                    
+                    temp_edges.push(CompactEdge::new(from_id, from_rev, to_id, to_rev));
+                    edge_count += 1;
+                }
+                
+                "P" => {
+                    // Path line: P <pname> <nodes> <overlaps>
+                    if fields.len() < 3 {
+                        warn!("Invalid P line: {}", line);
+                        continue;
+                    }
+                    
+                    let path_name = fields[1];
+                    let nodes_str = fields[2];
+                    
+                    if let Some((sample_hap_name, start, end)) = split_path_name(path_name) {
+                        // Parse path steps
+                        let mut translated_steps = Vec::new();
+                        
+                        for step_str in nodes_str.split(',') {
+                            if step_str.is_empty() {
+                                continue;
+                            }
+                            
+                            let (node_str, orient) = if step_str.ends_with('+') {
+                                (&step_str[..step_str.len()-1], false)
+                            } else if step_str.ends_with('-') {
+                                (&step_str[..step_str.len()-1], true)
+                            } else {
+                                warn!("Invalid step format: {}", step_str);
+                                continue;
+                            };
+                            
+                            let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
+                                panic!("Invalid node ID in path: {}", node_str);
+                            });
+                            
+                            // Use the translation map to get the new node ID
+                            if let Some(&translated_id) = id_translation.get(&NodeId::from(node_id)) {
+                                let translated_step = Handle::pack(translated_id, orient);
+                                translated_steps.push(translated_step);
+                            } else {
+                                warn!("Node {} in path {} not found in translation map", node_id, path_name);
+                            }
+                        }
+                        
+                        if !translated_steps.is_empty() {
+                            num_path_ranges += 1;
+                            num_path_range_steps += translated_steps.len();
+                            
+                            path_key_ranges.entry(sample_hap_name)
+                                .or_default()
+                                .push(RangeInfo { 
+                                    start, 
+                                    end, 
+                                    steps: translated_steps,
+                                });
+                        } else {
+                            warn!("Path '{}' has no steps", path_name);
+                        }
+                    }
+                }
+                
+                _ => {
+                    // Skip other line types (H, C, etc.)
                 }
             }
         }
+        
+        // Add edges with translated IDs
+        for edge in temp_edges {
+            if let (Some(&from_id), Some(&to_id)) = (
+                id_translation.get(&NodeId::from(edge.from_id())),
+                id_translation.get(&NodeId::from(edge.to_id()))
+            ) {
+                combined_graph.add_edge(
+                    from_id.into(),
+                    edge.from_rev(),
+                    to_id.into(),
+                    edge.to_rev()
+                );
+            }
+        }
+        
+        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", 
+            gfa_id, gfa_path, node_count, edge_count);
     }
 
     info!("Collected {} nodes, {} edges, {} path keys, {} path ranges, and {} path steps",
@@ -381,76 +457,20 @@ fn read_gfa_files(
     Ok((combined_graph, path_key_ranges))
 }
 
-fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>, temp_dir: Option<&str>) -> io::Result<GFA<usize, ()>> {
-    if gfa_path.ends_with(".gz") {
-        let file = std::fs::File::open(gfa_path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to open gzipped file '{}': {}", gfa_path, e)
-            )
-        })?;
-        
-        let (mut reader, _format) = niffler::get_reader(Box::new(file))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        
-        let mut decompressed = Vec::new();
-        reader.read_to_end(&mut decompressed).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to decompress file '{}': {}", gfa_path, e)
-            )
-        })?;
-        
-        // Create temporary file in the working directory if specified, otherwise in the same directory as the input file
-        let temp_dir = if let Some(work_dir) = temp_dir {
-            Path::new(work_dir)
-        } else {
-            Path::new(gfa_path).parent().unwrap_or(Path::new("."))
-        };
-        
-        // Create the directory if it doesn't exist
-        std::fs::create_dir_all(temp_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to create working directory '{}': {}", temp_dir.display(), e)
-            )
-        })?;
-        
-        let temp_file = NamedTempFile::new_in(temp_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to create temporary file in '{}': {}", temp_dir.display(), e)
-            )
-        })?;
-        
-        // Write decompressed data
-        temp_file.as_file().write_all(&decompressed).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to write to temporary file: {}", e)
-            )
-        })?;
-        
-        // Parse GFA
-        parser.parse_file(temp_file.path().to_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid temporary file path"
-            )
-        })?).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse GFA: {}", e)
-            )
-        })
-    } else {
-        parser.parse_file(gfa_path).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse GFA file '{}': {}", gfa_path, e)
-            )
-        })
-    }
+fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
+    let file = std::fs::File::open(gfa_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("Failed to open file '{}': {}", gfa_path, e)
+        )
+    })?;
+    
+    // Use niffler to handle both compressed and uncompressed files
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open reader for '{}': {}", gfa_path, e)))?;
+    
+    // Return a BufReader wrapping the niffler reader
+    Ok(Box::new(BufReader::new(reader)))
 }
 
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {

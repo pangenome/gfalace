@@ -10,7 +10,6 @@ bstr = "1.11.0"
 niffler = { version = "2.7.0", default-features = false, features = ["bz2", "gz", "bgz", "zstd"] } # lzma conflicts with lzma in rust-htslib
 clap = { version = "4.5.35", features = ["derive"] }
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
-gfa = "0.10.1"
 bitvec = "1.0.1"
 tempfile = "3.14.0"
 rustc-hash = "2.1.0"

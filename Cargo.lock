@@ -487,7 +487,6 @@ dependencies = [
  "bstr 1.12.0",
  "clap",
  "env_logger",
- "gfa",
  "handlegraph",
  "log",
  "niffler",
