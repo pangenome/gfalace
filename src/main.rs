@@ -19,6 +19,12 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::num::NonZeroUsize;
 
+use gzp::{
+    deflate::{Gzip, Bgzf},  // Both Gzip and Bgzf are in deflate module
+    par::compress::{ParCompress, ParCompressBuilder},
+};
+use zstd::stream::Encoder as ZstdEncoder;
+
 // use std::process::Command;
 
 // #[cfg(not(debug_assertions))]
@@ -907,13 +913,49 @@ fn write_graph_to_gfa(
     let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
     debug!("Marked {} unused nodes", nodes_to_remove.count_ones());
     
-    // Create the output file with niffler for compression support
+    // Create the output file
     let output_file = File::create(output_path)?;
-    let writer: Box<dyn Write> = niffler::get_writer(
-        Box::new(output_file),
-        compression_format,
-        niffler::compression::Level::Six,
-    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    
+    // Create writer based on compression format
+    let writer: Box<dyn Write> = match compression_format {
+        Format::Gzip => {
+            // Use parallel gzip compression
+            let parz: ParCompress<Gzip> = ParCompressBuilder::new()
+                .num_threads(rayon::current_num_threads())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to set threads: {:?}", e)))?
+                .compression_level(flate2::Compression::new(6))
+                .from_writer(output_file);
+            Box::new(parz)
+        },
+        Format::Bzip => {
+            // Use parallel BGZF compression
+            let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
+                .num_threads(rayon::current_num_threads())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to set threads: {:?}", e)))?
+                .compression_level(flate2::Compression::new(6))
+                .from_writer(output_file);
+            Box::new(parz)
+        },
+        Format::Zstd => {
+            // Use multi-threaded zstd compression
+            let mut encoder = ZstdEncoder::new(output_file, 6)?;
+            encoder.multithread(rayon::current_num_threads() as u32)?;
+            Box::new(encoder)
+        },
+        Format::No => {
+            // No compression
+            Box::new(output_file)
+        },
+        _ => {
+            // Fallback to niffler for other formats
+            niffler::get_writer(
+                Box::new(output_file),
+                compression_format,
+                niffler::compression::Level::Six,
+            ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        }
+    };
+    
     let mut file = BufWriter::new(writer);
     
     // Write GFA version
