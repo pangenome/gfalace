@@ -187,14 +187,16 @@ fn main() {
 
     // log_memory_usage("after_reading_files");
 
-    // Sort, deduplicate, trim, and link path ranges
+    // PASS 1: sort + dedup — purely local, so go parallel
     info!("Sorting, deduplicating, trimming, and linking {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
-    for (path_key, ranges) in path_key_ranges.iter_mut() {
-        debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
+    path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
+        sort_and_filter_ranges(ranges);
+    });
 
-        sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
-        trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
-        link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
+    // PASS 2: needs the shared graph, keep it sequential
+    for ranges in path_key_ranges.values_mut() {
+        trim_range_overlaps(ranges, &mut combined_graph);
+        link_contiguous_ranges(ranges, &mut combined_graph);
     }
     info!("Created {} nodes and {} edges", combined_graph.node_count, combined_graph.edges.len());
 
@@ -550,22 +552,12 @@ fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
 }
 
 fn sort_and_filter_ranges(
-    path_key: &str,
     ranges: &mut Vec<RangeInfo>,
-    debug: bool
 ) {
     // Sort ranges by start position
     ranges.sort_by_key(|r| (r.start, r.end));
 
-    if debug {
-        debug!("  Path key '{}' at the beginning", path_key);
-        for range in ranges.iter() {
-            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
-        }
-
-        debug!("  Removing redundant ranges");
-    }
+    debug!("  Removing redundant ranges");
 
     // Remove ranges that are contained within other ranges
     let mut write_idx = 0;
@@ -638,20 +630,18 @@ fn sort_and_filter_ranges(
     }
     ranges.truncate(write_idx + 1);
     
-    if debug {
-        debug!("  Path key '{}' without redundancy", path_key);
-        for range in ranges.iter() {
-            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
-        }
-    }
+    // if debug {
+    //     debug!("  Path key '{}' without redundancy", path_key);
+    //     for range in ranges.iter() {
+    //         //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+    //         debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
+    //     }
+    // }
 }
 
 fn trim_range_overlaps(
-    path_key: &str,
     ranges: &mut [RangeInfo],
     combined_graph: &mut CompactGraph,
-    debug: bool
 ) {
     // Trim overlaps
     debug!("  Trimming overlapping ranges");
@@ -828,21 +818,11 @@ fn trim_range_overlaps(
             debug!("      Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
         }
     }
-
-    if debug {
-        debug!("  Path key '{}' without overlaps", path_key);
-        for range in ranges.iter() {
-            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
-        }
-    }
 }
 
 fn link_contiguous_ranges(
-    path_key: &str,
     ranges: &mut [RangeInfo],
     combined_graph: &mut CompactGraph,
-    debug: bool
 ) {
     // Trim overlaps
     debug!("  Linking contiguous ranges");
@@ -873,14 +853,6 @@ fn link_contiguous_ranges(
                     );
                 }
             }
-        }
-    }
-
-    if debug {
-        debug!("  Path key '{}' without overlaps", path_key);
-        for range in ranges.iter() {
-            //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-            debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
         }
     }
 }
