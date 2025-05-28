@@ -887,7 +887,7 @@ fn write_graph_to_gfa(
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
     let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
-    debug!("Marked {} nodes", nodes_to_remove.count_ones());
+    debug!("Marked {} unused nodes", nodes_to_remove.count_ones());
     
     // Create the output file with niffler for compression support
     let output_file = File::create(output_path)?;
@@ -912,7 +912,7 @@ fn write_graph_to_gfa(
             id_mapping[node_id as usize] = new_id;
             
             let sequence = combined_graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
-            let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| String::from("N"));
+            let sequence_str = String::from_utf8(sequence).expect("Node sequence contains invalid UTF-8");
             writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
             
             new_id += 1;
