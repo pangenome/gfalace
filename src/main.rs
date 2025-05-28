@@ -936,7 +936,7 @@ fn write_graph_to_gfa(
     // Write paths by processing ranges directly
     info!("Writing paths by merging contiguous path ranges");
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
-    path_key_vec.sort(); // Sort path keys for consistent output
+    path_key_vec.par_sort_unstable(); // Sort path keys for consistent output (for path keys, the order of equal elements doesn't matter since they're unique)
 
     let mut start_gaps = 0;
     let mut middle_gaps = 0;
