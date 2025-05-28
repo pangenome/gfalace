@@ -480,6 +480,7 @@ dependencies = [
  "handlegraph",
  "log",
  "niffler",
+ "rayon",
  "rust-htslib",
  "rustc-hash",
  "tempfile",

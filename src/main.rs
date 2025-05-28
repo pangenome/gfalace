@@ -13,6 +13,12 @@ use log::{debug, info, warn, error};
 use rust_htslib::faidx;
 use niffler::compression::Format;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+use std::num::NonZeroUsize;
+
 // use std::process::Command;
 
 // #[cfg(not(debug_assertions))]
@@ -76,6 +82,10 @@ struct Args {
     #[clap(long, value_parser)]
     temp_dir: Option<String>,
 
+    /// Number of threads for parallel processing.
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
+    num_threads: NonZeroUsize,
+
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
     verbose: u8,
@@ -117,6 +127,12 @@ fn main() {
         _ => log::LevelFilter::Debug,
     })
     .init();
+    
+    // Configure thread pool
+    ThreadPoolBuilder::new()
+        .num_threads(args.num_threads.into())
+        .build_global()
+        .unwrap();
 
     // Determine compression format
     let compression_format = get_compression_format(&args.compress, &args.output);
@@ -332,162 +348,172 @@ fn read_gfa_files(
     gfa_list: &[String],
     temp_dir: Option<&str>,
 ) -> io::Result<(CompactGraph, FxHashMap<String, Vec<RangeInfo>>)> {
-    let mut combined_graph = CompactGraph::new(temp_dir)?;
-    let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
+    // Shared structures protected by Mutex, wrapped in Arc for thread‑safe sharing
+    let combined_graph = Arc::new(Mutex::new(CompactGraph::new(temp_dir)?));
+    let path_key_ranges: Arc<Mutex<FxHashMap<String, Vec<RangeInfo>>>> =
+        Arc::new(Mutex::new(FxHashMap::default()));
 
-    let mut num_path_ranges = 0;
-    let mut num_path_range_steps = 0;
+    // Cheap thread‑safe counters just for stats
+    let num_path_ranges = AtomicUsize::new(0);
+    let num_path_range_steps = AtomicUsize::new(0);
 
-    // Process each GFA file
-    for (gfa_id, gfa_path) in gfa_list.iter().enumerate() {
-        let reader = get_gfa_reader(gfa_path)?;
-        
-        // Create a translation map for this GFA file
-        let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
-        let mut temp_edges: Vec<CompactEdge> = Vec::new();
-        
-        let mut node_count = 0;
-        let mut edge_count = 0;
-        
-        // Read GFA file line by line
-        for line in reader.lines() {
-            let line = line?;
-            let line = line.trim();
-            
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.is_empty() {
-                continue;
-            }
-            
-            match fields[0] {
-                "S" => {
-                    // Segment line: S <sid> <seq> [<tag>]*
-                    if fields.len() < 3 {
-                        warn!("Invalid S line: {}", line);
-                        continue;
-                    }
-                    
-                    let node_id: u64 = fields[1].parse().unwrap_or_else(|_| {
-                        panic!("Invalid node ID: {}", fields[1]);
-                    });
-                    let sequence = fields[2].as_bytes();
-                    
-                    let new_node_id = combined_graph.add_node(sequence)?;
-                    id_translation.insert(NodeId::from(node_id), NodeId::from(new_node_id));
-                    node_count += 1;
+    // Process each file in parallel without loading everything in memory
+    gfa_list.par_iter().enumerate().for_each(|(gfa_id, gfa_path)| {
+        if let Ok(reader) = get_gfa_reader(gfa_path) {
+            let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+            let mut temp_edges: Vec<CompactEdge> = Vec::new();
+
+            let mut node_count = 0usize;
+            let mut edge_count = 0usize;
+
+            for line in reader.lines().flatten() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
                 }
-                
-                "L" => {
-                    // Link line: L <sid1> <orient1> <sid2> <orient2> <overlap>
-                    if fields.len() < 6 {
-                        warn!("Invalid L line: {}", line);
-                        continue;
-                    }
-                    
-                    let from_id: u64 = fields[1].parse().unwrap_or_else(|_| {
-                        panic!("Invalid from node ID: {}", fields[1]);
-                    });
-                    let from_rev = fields[2] == "-";
-                    let to_id: u64 = fields[3].parse().unwrap_or_else(|_| {
-                        panic!("Invalid to node ID: {}", fields[3]);
-                    });
-                    let to_rev = fields[4] == "-";
-                    
-                    temp_edges.push(CompactEdge::new(from_id, from_rev, to_id, to_rev));
-                    edge_count += 1;
+
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.is_empty() {
+                    continue;
                 }
-                
-                "P" => {
-                    // Path line: P <pname> <nodes> <overlaps>
-                    if fields.len() < 3 {
-                        warn!("Invalid P line: {}", line);
-                        continue;
-                    }
-                    
-                    let path_name = fields[1];
-                    let nodes_str = fields[2];
-                    
-                    if let Some((sample_hap_name, start, end)) = split_path_name(path_name) {
-                        // Parse path steps
-                        let mut translated_steps = Vec::new();
-                        
-                        for step_str in nodes_str.split(',') {
-                            if step_str.is_empty() {
-                                continue;
-                            }
-                            
-                            let (node_str, orient) = if step_str.ends_with('+') {
-                                (&step_str[..step_str.len()-1], false)
-                            } else if step_str.ends_with('-') {
-                                (&step_str[..step_str.len()-1], true)
-                            } else {
-                                warn!("Invalid step format: {}", step_str);
-                                continue;
-                            };
-                            
-                            let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
-                                panic!("Invalid node ID in path: {}", node_str);
-                            });
-                            
-                            // Use the translation map to get the new node ID
-                            if let Some(&translated_id) = id_translation.get(&NodeId::from(node_id)) {
-                                let translated_step = Handle::pack(translated_id, orient);
-                                translated_steps.push(translated_step);
-                            } else {
-                                warn!("Node {} in path {} not found in translation map", node_id, path_name);
-                            }
+
+                match fields[0] {
+                    "S" => {
+                        // Segment line: S <sid> <seq> [<tag>]*
+                        if fields.len() < 3 {
+                            warn!("Invalid S line: {}", line);
+                            continue;
                         }
-                        
-                        if !translated_steps.is_empty() {
-                            num_path_ranges += 1;
-                            num_path_range_steps += translated_steps.len();
-                            
-                            path_key_ranges.entry(sample_hap_name)
-                                .or_default()
-                                .push(RangeInfo { 
-                                    start, 
-                                    end, 
-                                    steps: translated_steps,
+                        let node_id: u64 = fields[1].parse().unwrap_or_else(|_| {
+                            panic!("Invalid node ID: {}", fields[1]);
+                        });
+                        let sequence = fields[2].as_bytes();
+
+                        // one node at a time – keeps memory low
+                        let new_node_id = {
+                            let mut graph = combined_graph.lock().unwrap();
+                            graph.add_node(sequence).unwrap()
+                        };
+                        id_translation.insert(NodeId::from(node_id), NodeId::from(new_node_id));
+                        node_count += 1;
+                    }
+                    "L" => {
+                        // Link line: L <sid1> <orient1> <sid2> <orient2> <overlap>
+                        if fields.len() < 6 {
+                            warn!("Invalid L line: {}", line);
+                            continue;
+                        }
+
+                        let from_id: u64 = fields[1].parse().unwrap_or_else(|_| {
+                            panic!("Invalid from node ID: {}", fields[1]);
+                        });
+                        let from_rev = fields[2] == "-";
+                        let to_id: u64 = fields[3].parse().unwrap_or_else(|_| {
+                            panic!("Invalid to node ID: {}", fields[3]);
+                        });
+                        let to_rev = fields[4] == "-";
+                        temp_edges.push(CompactEdge::new(from_id, from_rev, to_id, to_rev));
+                        edge_count += 1;
+                    }
+                    "P" => {
+                        // Path line: P <pname> <nodes> <overlaps>
+                        if fields.len() < 3 {
+                            warn!("Invalid P line: {}", line);
+                            continue;
+                        }
+                        let path_name = fields[1];
+                        let nodes_str = fields[2];
+
+                        if let Some((sample_hap_name, start, end)) = split_path_name(path_name) {
+                            // Parse path steps
+                            let mut translated_steps = Vec::new();
+                            for step_str in nodes_str.split(',') {
+                                if step_str.is_empty() {
+                                    continue;
+                                }
+                                let (node_str, orient) = if step_str.ends_with('+') {
+                                    (&step_str[..step_str.len() - 1], false)
+                                } else if step_str.ends_with('-') {
+                                    (&step_str[..step_str.len() - 1], true)
+                                } else {
+                                    warn!("Invalid step format: {}", step_str);
+                                    continue;
+                                };
+
+                                let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
+                                    panic!("Invalid node ID in path: {}", node_str);
                                 });
-                        } else {
-                            warn!("Path '{}' has no steps", path_name);
+
+                                // Use the translation map to get the new node ID
+                                if let Some(&translated_id) = id_translation.get(&NodeId::from(node_id)) {
+                                    translated_steps.push(Handle::pack(translated_id, orient));
+                                } else {
+                                    warn!("Node {} in path {} not found in translation map", node_id, path_name);
+                                }
+                            }
+                            if !translated_steps.is_empty() {
+                                num_path_ranges.fetch_add(1, Ordering::Relaxed);
+                                num_path_range_steps.fetch_add(translated_steps.len(), Ordering::Relaxed);
+
+                                let mut map = path_key_ranges.lock().unwrap();
+                                map.entry(sample_hap_name.to_string())
+                                    .or_default()
+                                    .push(RangeInfo {
+                                        start,
+                                        end,
+                                        steps: translated_steps,
+                                    });
+                            }
                         }
                     }
-                }
-                
-                _ => {
-                    // Skip other line types (H, C, etc.)
+                    _ => {
+                        // Skip other line types (H, C, etc.)
+                    }
                 }
             }
-        }
-        
-        // Add edges with translated IDs
-        for edge in temp_edges {
-            if let (Some(&from_id), Some(&to_id)) = (
-                id_translation.get(&NodeId::from(edge.from_id())),
-                id_translation.get(&NodeId::from(edge.to_id()))
-            ) {
-                combined_graph.add_edge(
-                    from_id.into(),
-                    edge.from_rev(),
-                    to_id.into(),
-                    edge.to_rev()
-                );
+
+            // Add edges with translated IDs
+            for edge in temp_edges {
+                if let (Some(&from_id), Some(&to_id)) = (
+                    id_translation.get(&NodeId::from(edge.from_id())),
+                    id_translation.get(&NodeId::from(edge.to_id())),
+                ) {
+                    let mut graph = combined_graph.lock().unwrap();
+                    graph.add_edge(from_id.into(), edge.from_rev(), to_id.into(), edge.to_rev());
+                }
             }
+
+            debug!(
+                "GFA file {} ({}) processed: {} nodes, {} edges",
+                gfa_id, gfa_path, node_count, edge_count
+            );
+        } else {
+            error!("Failed to open GFA file '{}'", gfa_path);
         }
-        
-        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", 
-            gfa_id, gfa_path, node_count, edge_count);
-    }
+    });
 
-    info!("Collected {} nodes, {} edges, {} path keys, {} path ranges, and {} path steps",
-        combined_graph.node_count, combined_graph.edges.len(), path_key_ranges.len(), num_path_ranges, num_path_range_steps);
+    // Unwrap the Arc/Mutex wrappers now that all threads have finished
+    let graph = Arc::try_unwrap(combined_graph)
+        .ok()
+        .expect("More than one Arc pointer to graph")
+        .into_inner()
+        .unwrap();
+    let path_map = Arc::try_unwrap(path_key_ranges)
+        .ok()
+        .expect("More than one Arc pointer to path map")
+        .into_inner()
+        .unwrap();
 
-    Ok((combined_graph, path_key_ranges))
+    info!(
+        "Collected {} nodes, {} edges, {} path keys, {} path ranges and {} path steps",
+        graph.node_count,
+        graph.edges.len(),
+        path_map.len(),
+        num_path_ranges.load(Ordering::Relaxed),
+        num_path_range_steps.load(Ordering::Relaxed)
+    );
+
+    Ok((graph, path_map))
 }
 
 fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
