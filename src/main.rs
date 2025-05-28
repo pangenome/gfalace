@@ -179,7 +179,7 @@ fn main() {
 
     // Create a single combined graph without paths and a map of path key to ranges
     info!("Collecting metadata from {} GFA files", gfa_files.len());
-    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref())
+    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref())
         .unwrap_or_else(|e| {
             error!("Failed to read GFA files: {}", e);
             std::process::exit(1);
@@ -193,11 +193,24 @@ fn main() {
         sort_and_filter_ranges(ranges);
     });
 
-    // PASS 2: needs the shared graph, keep it sequential
-    for ranges in path_key_ranges.values_mut() {
-        trim_range_overlaps(ranges, &mut combined_graph);
-        link_contiguous_ranges(ranges, &mut combined_graph);
-    }
+    // PASS 2: Process different path keys in parallel with minimal locking
+    info!("Trimming overlaps and linking contiguous ranges for {} path keys", path_key_ranges.len());
+    
+    // Wrap graph in Arc<Mutex> for thread-safe access
+    let graph_mutex = Arc::new(Mutex::new(combined_graph));
+
+    path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
+        trim_range_overlaps(ranges, &graph_mutex);
+        link_contiguous_ranges(ranges, &graph_mutex);
+    });
+
+    // Unwrap the graph from Arc<Mutex>
+    let mut combined_graph = Arc::try_unwrap(graph_mutex)
+        .ok()
+        .expect("Failed to unwrap graph mutex")
+        .into_inner()
+        .unwrap();
+
     info!("Created {} nodes and {} edges", combined_graph.node_count, combined_graph.edges.len());
 
     // log_memory_usage("before_writing");
@@ -641,9 +654,8 @@ fn sort_and_filter_ranges(
 
 fn trim_range_overlaps(
     ranges: &mut [RangeInfo],
-    combined_graph: &mut CompactGraph,
+    graph_mutex: &Arc<Mutex<CompactGraph>>,
 ) {
-    // Trim overlaps
     debug!("  Trimming overlapping ranges");
 
     for i in 1..ranges.len() {
@@ -666,43 +678,30 @@ fn trim_range_overlaps(
             let mut step_to_split: Option<usize> = None;
             let mut cumulative_pos = r2.start;
 
-            for (idx, &step_handle) in r2.steps.iter().enumerate() {
-                let step_start = cumulative_pos;
-                let node_seq = combined_graph.get_sequence(step_handle).unwrap();
-                let node_length = node_seq.len();
-                cumulative_pos += node_length;
-                let step_end = cumulative_pos;
+            // First pass: identify steps to remove/split (read-only, brief lock)
+            {
+                let mut graph = graph_mutex.lock().unwrap();
+                for (idx, &step_handle) in r2.steps.iter().enumerate() {
+                    let step_start = cumulative_pos;
+                    let node_seq = graph.get_sequence(step_handle).unwrap();
+                    let node_length = node_seq.len();
+                    cumulative_pos += node_length;
+                    let step_end = cumulative_pos;
 
-                if step_end <= overlap_start {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    continue;
-                } else if step_start >= overlap_end {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] after overlap", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    break;
-                } else if step_start >= overlap_start && step_end <= overlap_end {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] fully overlaps", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    steps_to_remove.push(idx);
-                } else {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    if step_to_split.is_some() {
-                        panic!("Error: More than one step is partially overlapping, which is not allowed.");
+                    if step_end <= overlap_start {
+                        continue;
+                    } else if step_start >= overlap_end {
+                        break;
+                    } else if step_start >= overlap_start && step_end <= overlap_end {
+                        steps_to_remove.push(idx);
+                    } else {
+                        if step_to_split.is_some() {
+                            panic!("Error: More than one step is partially overlapping, which is not allowed.");
+                        }
+                        step_to_split = Some(idx);
                     }
-                    step_to_split = Some(idx);
                 }
-            }
-
-            // if debug && r2.start == 11000 {
-            //     debug!("    Total steps to remove: {}", steps_to_remove.len());
-            //     debug!("    Step to split: {:?}", step_to_split);   
-            // }
+            } // Lock released here
 
             // Initialize new vectors to store updated steps
             let mut new_steps = Vec::with_capacity(r2.steps.len() / 2);
@@ -712,10 +711,16 @@ fn trim_range_overlaps(
             // Reset cumulative position for second pass
             cumulative_pos = r2.start;
 
-            // Iterate over the original steps using incrementally computed positions
+            // Second pass: Iterate over the original steps using incrementally computed positions
             for (idx, &step_handle) in r2.steps.iter().enumerate() {
                 let step_start = cumulative_pos;
-                let node_seq = combined_graph.get_sequence(step_handle).unwrap();
+                
+                // Get node sequence with lock
+                let node_seq = {
+                    let mut graph = graph_mutex.lock().unwrap();
+                    graph.get_sequence(step_handle).unwrap()
+                }; // Lock released here
+                
                 let node_length = node_seq.len();
                 cumulative_pos += node_length;
                 let step_end = cumulative_pos;
@@ -742,7 +747,13 @@ fn trim_range_overlaps(
 
                         // Keep left part
                         let new_seq = node_seq[0..overlap_start_offset].to_vec();
-                        let node_id = combined_graph.add_node(&new_seq).unwrap();
+                        
+                        // Add node with lock
+                        let node_id = {
+                            let mut graph = graph_mutex.lock().unwrap();
+                            graph.add_node(&new_seq).unwrap()
+                        }; // Lock released here
+                        
                         let new_node = Handle::pack(NodeId::from(node_id), false);
 
                         new_steps.push(new_node);
@@ -756,7 +767,13 @@ fn trim_range_overlaps(
 
                         // Keep right part
                         let new_seq = node_seq[overlap_end_offset..].to_vec();
-                        let node_id = combined_graph.add_node(&new_seq).unwrap();
+                        
+                        // Add node with lock
+                        let node_id = {
+                            let mut graph = graph_mutex.lock().unwrap();
+                            graph.add_node(&new_seq).unwrap()
+                        }; // Lock released here
+                        
                         let new_node = Handle::pack(NodeId::from(node_id), false);
 
                         new_steps.push(new_node);
@@ -785,23 +802,24 @@ fn trim_range_overlaps(
                 if idx > 0 {
                     let prev_step = r2.steps[idx - 1];
                     let curr_step = r2.steps[idx];
-                    // Create edge if it doesn't exist
-                    if !combined_graph.has_edge(
+                    
+                    // Check and add edge with lock
+                    let mut graph = graph_mutex.lock().unwrap();
+                    if !graph.has_edge(
                         prev_step.id().into(),
                         prev_step.is_reverse(),
                         curr_step.id().into(),
                         curr_step.is_reverse()
                     ) {
                         debug!("      Creating edge between steps: {} -> {}", prev_step.id(), curr_step.id());
-
-                        combined_graph.add_edge(
+                        graph.add_edge(
                             prev_step.id().into(),
                             prev_step.is_reverse(),
                             curr_step.id().into(),
                             curr_step.is_reverse()
                         );
                     }
-
+                    // Lock released at end of scope
                 }
             }
 
@@ -821,37 +839,37 @@ fn trim_range_overlaps(
 }
 
 fn link_contiguous_ranges(
-    ranges: &mut [RangeInfo],
-    combined_graph: &mut CompactGraph,
+    ranges: &[RangeInfo],
+    graph_mutex: &Arc<Mutex<CompactGraph>>,
 ) {
     // Trim overlaps
     debug!("  Linking contiguous ranges");
 
     for i in 1..ranges.len() {
-        let (left, right) = ranges.split_at_mut(i);
-        let r1 = &mut left[left.len()-1];
-        let r2 = &mut right[0];
+        let r1 = &ranges[i-1];
+        let r2 = &ranges[i];
 
         // Check if ranges are contiguous
         if r1.is_contiguous_with(r2) {
             // Get last handle from previous range and first handle from current range
             if let (Some(&last_handle), Some(&first_handle)) = (r1.steps.last(), r2.steps.first()) {
-                // Create edge if it doesn't exist
-                if !combined_graph.has_edge(
+                // Lock only for checking and adding edge
+                let mut graph = graph_mutex.lock().unwrap();
+                if !graph.has_edge(
                     last_handle.id().into(),
                     last_handle.is_reverse(),
                     first_handle.id().into(),
                     first_handle.is_reverse()
                 ) {
                     debug!("    Creating edge between contiguous ranges at position {}: {} -> {}", r1.end, last_handle.id(), first_handle.id());
-
-                    combined_graph.add_edge(
+                    graph.add_edge(
                         last_handle.id().into(),
                         last_handle.is_reverse(),
                         first_handle.id().into(),
                         first_handle.is_reverse()
                     );
                 }
+                // Lock released at end of scope
             }
         }
     }
