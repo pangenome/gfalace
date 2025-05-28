@@ -186,27 +186,22 @@ fn main() {
         });
 
     // log_memory_usage("after_reading_files");
-    
-    // PASS 1: Sort, deduplicate, and filter ranges - no graph access needed, fully parallel
-    info!("Sorting, deduplicating, and filtering {} ranges from {} path keys", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>(), path_key_ranges.len());
+
+    // PASS 1: sort + dedup — purely local, so go parallel
+    info!("Sorting, deduplicating, trimming, and linking {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
     path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
         sort_and_filter_ranges(ranges);
     });
 
-    // PASS 2: Trim overlaps and link ranges - requires graph access, uses mutex
-    info!("Trimming overlaps and linking contiguous {} ranges from {} path keys", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>(), path_key_ranges.len());
+    // PASS 2: Process different path keys in parallel with minimal locking
+    info!("Trimming overlaps and linking contiguous ranges for {} path keys", path_key_ranges.len());
     
     // Wrap graph in Arc<Mutex> for thread-safe access
     let graph_mutex = Arc::new(Mutex::new(combined_graph));
+
     path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
         trim_range_overlaps(ranges, &graph_mutex);
         link_contiguous_ranges(ranges, &graph_mutex);
-    });
-
-    // PASS 3: Merge contiguous ranges - no graph access needed, fully parallel
-    info!("Merging contiguous ranges for {} ranges from {} path keys", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>(), path_key_ranges.len());
-    path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
-        merge_contiguous_ranges(ranges);
     });
 
     // Unwrap the graph from Arc<Mutex>
@@ -220,7 +215,7 @@ fn main() {
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_reader) {
+    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_reader, args.verbose > 1) {
         Ok(_) => info!("Successfully wrote the combined graph to {} ({:?} format)", args.output, compression_format),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
@@ -880,41 +875,6 @@ fn link_contiguous_ranges(
     }
 }
 
-fn merge_contiguous_ranges(ranges: &mut Vec<RangeInfo>) {
-    if ranges.len() <= 1 {
-        return;
-    }
-    
-    let mut write_idx = 0;
-    let mut read_idx = 1;
-    
-    while read_idx < ranges.len() {
-        if ranges[write_idx].is_contiguous_with(&ranges[read_idx]) {
-            // Merge: extend the current range at write_idx
-            ranges[write_idx].end = ranges[read_idx].end;
-            
-            // Move steps from read_idx to write_idx efficiently
-            // First, get the steps from read_idx (this leaves an empty Vec at read_idx)
-            let mut steps_to_add = std::mem::take(&mut ranges[read_idx].steps);
-            
-            // Use append to move all elements without reallocation
-            ranges[write_idx].steps.append(&mut steps_to_add);
-            
-            read_idx += 1;
-        } else {
-            // Not contiguous - move read range to next write position
-            write_idx += 1;
-            if write_idx != read_idx {
-                ranges.swap(write_idx, read_idx);
-            }
-            read_idx += 1;
-        }
-    }
-    
-    // Truncate to remove merged ranges
-    ranges.truncate(write_idx + 1);
-}
-
 fn mark_nodes_for_removal(
     node_count: u64,
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>
@@ -941,6 +901,7 @@ fn write_graph_to_gfa(
     compression_format: Format,
     fill_gaps: u8,
     fasta_reader: &Option<faidx::Reader>,
+    debug: bool
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
     let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
@@ -990,8 +951,8 @@ fn write_graph_to_gfa(
         }
     }
 
-    // Write paths by filling gaps if requested
-    info!("Writing paths with gap filling: {}", fill_gaps);
+    // Write paths by processing ranges directly
+    info!("Writing paths by merging contiguous path ranges");
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
     path_key_vec.par_sort_unstable(); // Sort path keys for consistent output (for path keys, the order of equal elements doesn't matter since they're unique)
 
@@ -1006,112 +967,158 @@ fn write_graph_to_gfa(
 
     for path_key in path_key_vec {
         let ranges = &path_key_ranges[path_key];
-        // if ranges.is_empty() {
-        //     continue;
-        // }
 
-        let mut path_elements = Vec::new();
-        let mut path_start = ranges[0].start;
-        let mut path_end = ranges[0].start;
-
-        // Handle initial gap if needed
-        if fill_gaps == 2 && ranges[0].start > 0 {
-            start_gaps += 1;
-            let gap_element = create_gap_node(
-                &mut file,
-                (0, ranges[0].start),
-                path_key,
-                fasta_reader,
-                None, // No previous element for initial gap
-                ranges[0].steps.first(),
-                &id_mapping,
-                &mut new_id,
-            )?;
-            path_elements.push(gap_element);
-            path_start = 0;
-        }
-
-        // Process each range
-        for (i, range) in ranges.iter().enumerate() {
-            // Add current range steps
-            add_range_steps_to_path(range, &id_mapping, &mut path_elements);
-            path_end = range.end;
-
-            // Check for gap to next range
-            if i < ranges.len() - 1 {
-                let next_range = &ranges[i + 1];
-                if !range.is_contiguous_with(next_range) {
-                    if fill_gaps > 0 {
-                        // Fill the gap
-                        middle_gaps += 1;
-                        let gap_element = create_gap_node(
-                            &mut file,
-                            (range.end, next_range.start),
-                            path_key,
-                            fasta_reader,
-                            path_elements.last(),
-                            next_range.steps.first(),
-                            &id_mapping,
-                            &mut new_id,
-                        )?;
-                        path_elements.push(gap_element);
-                    } else {
-                        // No gap filling - write current path and start new one
-                        if !path_elements.is_empty() {
-                            let path_name = format!("{}:{}-{}", path_key, path_start, path_end);
-                            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
-                            path_elements.clear();
-                        }
-                        path_start = next_range.start;
-                    }
+        if debug {
+            debug!("Processing Path key '{}'", path_key);
+            
+            let mut current_start = ranges[0].start;
+            let mut current_end = ranges[0].end;
+            
+            for i in 1..ranges.len() {
+                if ranges[i-1].is_contiguous_with(&ranges[i]) {
+                    // Extend current merged range
+                    current_end = ranges[i].end;
                 } else {
-                    warn!("Contiguous ranges found, it should have been merged already: {}, {:?} and {:?}", path_key, range, next_range);
+                    // Print current merged range
+                    debug!("  Merged range: start={}, end={}", 
+                        current_start, current_end);
+                    
+                    if !ranges[i-1].overlaps_with(&ranges[i]) {
+                        // Calculate and print gap
+                        let gap = ranges[i].start - current_end;
+                        debug!("    Gap to next range: {} positions", gap);
+                    } else {
+                        // Calculate and print overlap (IT SHOULD NOT HAPPEN)
+                        let overlap = current_end - ranges[i].start;
+                        debug!("    Overlap with next range: {} positions", overlap);
+                    }
+    
+                    // Start new merged range
+                    current_start = ranges[i].start;
+                    current_end = ranges[i].end;
                 }
             }
+            
+            // Print final merged range
+            debug!("  Final merged range: start={}, end={}", 
+                current_start, current_end);
         }
 
-        // Handle final gap if needed
-        if fill_gaps == 2 {
-            // Get sequence length if FASTA is provided
-            if let Some(total_length) = fasta_reader.as_ref()
-                .map(|reader| reader.fetch_seq_len(path_key) as usize) 
-            {
-                if path_end < total_length {
-                    end_gaps += 1;
+        let mut current_range_idx = 0;
+
+        while current_range_idx < ranges.len() {
+            let start_range = &ranges[current_range_idx];
+            let mut next_idx = current_range_idx + 1;
+            let mut end_range = start_range;
+            
+            // Initialize path elements vector
+            let mut path_elements = Vec::new();
+
+            // Handle initial gap if it exists and gap filling is enabled
+            if fill_gaps == 2 && start_range.start > 0 {
+                start_gaps += 1;
+
+                let gap_element = create_gap_node(
+                    &mut file,
+                    (0, start_range.start),
+                    path_key,
+                    fasta_reader,
+                    None, // No previous element for initial gap
+                    start_range.steps.first(),
+                    &id_mapping,
+                    &mut new_id,
+                )?;
+                path_elements.push(gap_element);
+            }
+
+            // Add first range steps
+            add_range_steps_to_path(start_range, &id_mapping, &mut path_elements);
+            
+            // Process subsequent contiguous ranges or add gap nodes
+            while next_idx < ranges.len() {
+                let next_range = &ranges[next_idx];
+
+                if ranges[next_idx - 1].is_contiguous_with(next_range) {
+                    // Ranges are contiguous - add steps directly
+                    add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
+                    end_range = next_range;
+                    next_idx += 1;
+                } else if fill_gaps > 0 {
+                    middle_gaps += 1;
+
+                    // Fill gap between ranges
                     let gap_element = create_gap_node(
                         &mut file,
-                        (path_end, total_length),
+                        (end_range.end, next_range.start),
                         path_key,
                         fasta_reader,
                         path_elements.last(),
-                        None,  // No next node for final gap
+                        next_range.steps.first(),
                         &id_mapping,
                         &mut new_id,
                     )?;
                     path_elements.push(gap_element);
-                    path_end = total_length;
-                } else if path_end > total_length {
-                    warn!("Path '{}' extends beyond sequence length ({} > {})", 
-                        path_key, path_end, total_length);
+
+                    // Continue addint stpes of the next range
+                    add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
+                    end_range = next_range;
+                    next_idx += 1;
+                } else {
+                    // Not filling gaps - break and create new path
+                    break;
                 }
             }
-        }
 
-        // Write remaining path if any
-        if !path_elements.is_empty() {
-            // Determine if this is a full path
-            let is_full_path = path_start == 0 && 
-                fasta_reader.as_ref()
-                    .map(|reader| reader.fetch_seq_len(path_key))
-                    .map_or(true, |total_len| path_end == total_len as usize);
+            // Handle final gap if sequence length is known and gap filling is enabled
+            if fill_gaps == 2 {
+                // Get sequence length if FASTA is provided
+                if let Some(total_length) = fasta_reader.as_ref().map(|reader| reader.fetch_seq_len(path_key) as usize) {
+                    match end_range.end.cmp(&total_length) {
+                        std::cmp::Ordering::Less => {
+                            end_gaps += 1;
+                    
+                            let gap_element = create_gap_node(
+                                &mut file,
+                                (end_range.end, total_length),
+                                path_key,
+                                fasta_reader,
+                                path_elements.last(),
+                                None,  // No next node for final gap
+                                &id_mapping,
+                                &mut new_id,
+                            )?;
+                            path_elements.push(gap_element);
+                        }
+                        std::cmp::Ordering::Greater => {
+                            warn!("Path '{}' extends beyond sequence length ({} > {})", 
+                                path_key, end_range.end, total_length);
+                        }
+                        std::cmp::Ordering::Equal => {}
+                    }
+                }
+            }
 
-            let path_name = if is_full_path {
-                path_key.to_string()
-            } else {
-                // Create path name with range information
-                format!("{}:{}-{}", path_key, path_start, path_end)
-            };
-            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+            // Write path
+            if !path_elements.is_empty() {
+                // Check if all ranges are contiguous, and path starts at position 0,
+                // and either no FASTA reader available or path extends to sequence end
+                let is_full_path = next_idx - current_range_idx == ranges.len() 
+                                    && start_range.start == 0
+                                    && fasta_reader.as_ref()
+                                        .map(|reader| reader.fetch_seq_len(path_key))
+                                        .map_or(true, |total_len| end_range.end == total_len as usize);
+
+                let path_name = if is_full_path {
+                    path_key.to_string()
+                } else {
+                    // Create path name with range information
+                    format!("{}:{}-{}", path_key, start_range.start, end_range.end)
+                };
+                
+                writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+            }
+            
+            current_range_idx = next_idx;
         }
     }
 
