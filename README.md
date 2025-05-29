@@ -44,7 +44,7 @@ The input GFA files can be provided in any order. This is because GFALace uses t
 
 ## Options
 
-- `-g, --gfa-list`: List of input GFA files (space-separated)
+- `-g, --gfa-files`: List of input GFA files (space-separated)
 - `-l, --gfa-list`: Text file containing GFA paths (one per line)
 - `-o, --output`: Output GFA file path
 - `--compress`: Output compression format: `none`, `gzip`, `bgzip`, `zstd`, or `auto` (default: auto-detect from extension)
