@@ -1,21 +1,29 @@
 use std::{
     fs::File,
-    io::{self, Write},
-    path::Path,
+    io::{self, Read, Write, Seek, SeekFrom, BufWriter, BufReader, BufRead},
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use clap::Parser;
 use handlegraph::{
-    handle::{Handle, NodeId, Edge},
-    handlegraph::*,
-    mutablehandlegraph::*,
-    hashgraph::HashGraph,
+    handle::{Handle, NodeId},
 };
-use gfa::{gfa::GFA, parser::GFAParser};
 use bitvec::{bitvec, prelude::BitVec};
 use tempfile::NamedTempFile;
 use log::{debug, info, warn, error};
 use rust_htslib::faidx;
+use niffler::compression::Format;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+use std::num::NonZeroUsize;
+
+use gzp::{
+    deflate::{Gzip, Bgzf},  // Both Gzip and Bgzf are in deflate module
+    par::compress::{ParCompress, ParCompressBuilder},
+};
+use zstd::stream::Encoder as ZstdEncoder;
 
 // use std::process::Command;
 
@@ -35,6 +43,20 @@ use rust_htslib::faidx;
 //     info!("Memory usage at {}: {:.2} MB", stage, memory_mb);
 // }
 
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&base| match base {
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'U' | b'u' => b'A',
+            _ => b'N',
+        })
+        .collect()
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
@@ -50,6 +72,10 @@ struct Args {
     #[clap(short, long, value_parser)]
     output: String,
 
+    /// Output compression format: none, gzip (.gz), bgzip (.bgz), or zstd (.zst)
+    #[clap(long, value_parser, default_value = "auto")]
+    compress: String,
+
     /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --fasta for end gaps)
     #[clap(long, default_value = "0")]
     fill_gaps: u8,
@@ -62,9 +88,38 @@ struct Args {
     #[clap(long, value_parser)]
     temp_dir: Option<String>,
 
+    /// Number of threads for parallel processing.
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
+    num_threads: NonZeroUsize,
+
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
     verbose: u8,
+}
+
+fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
+    match compress_arg.to_lowercase().as_str() {
+        "none" => Format::No,
+        "gzip" | "gz" => Format::Gzip,
+        "bgzip" | "bgz" => Format::Bzip,
+        "zstd" | "zst" => Format::Zstd,
+        "auto" => {
+            // Auto-detect based on file extension
+            if output_path.ends_with(".gz") {
+                Format::Gzip
+            } else if output_path.ends_with(".bgz") {
+                Format::Bzip
+            } else if output_path.ends_with(".zst") {
+                Format::Zstd
+            } else {
+                Format::No
+            }
+        }
+        _ => {
+            warn!("Unsupported compression format '{}', using none", compress_arg);
+            Format::No
+        }
+    }
 }
 
 fn main() {
@@ -78,6 +133,15 @@ fn main() {
         _ => log::LevelFilter::Debug,
     })
     .init();
+    
+    // Configure thread pool
+    ThreadPoolBuilder::new()
+        .num_threads(args.num_threads.into())
+        .build_global()
+        .unwrap();
+
+    // Determine compression format
+    let compression_format = get_compression_format(&args.compress, &args.output);
 
     // Get the list of GFA files
     let gfa_files = match (args.gfa_files, args.gfa_list) {
@@ -120,49 +184,182 @@ fn main() {
     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
-    let (mut combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref());
+    info!("Collecting metadata from {} GFA files", gfa_files.len());
+    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref())
+        .unwrap_or_else(|e| {
+            error!("Failed to read GFA files: {}", e);
+            std::process::exit(1);
+        });
 
     // log_memory_usage("after_reading_files");
 
-    // Sort, deduplicate, trim, and link path ranges
+    // PASS 1: sort + dedup — purely local, so go parallel
     info!("Sorting, deduplicating, trimming, and linking {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
-    for (path_key, ranges) in path_key_ranges.iter_mut() {
-        debug!("Processing path key '{}' with {} ranges", path_key, ranges.len());
+    path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
+        sort_and_filter_ranges(ranges);
+    });
 
-        sort_and_filter_ranges(path_key, ranges, args.verbose > 1);
-        trim_range_overlaps(path_key, ranges, &mut combined_graph, args.verbose > 1);
-        link_contiguous_ranges(path_key, ranges, &mut combined_graph, args.verbose > 1);
-    }
-    info!("Created {} nodes and {} edges",
-        combined_graph.node_count(), combined_graph.edge_count());
+    // PASS 2: Process different path keys in parallel with minimal locking
+    info!("Trimming overlaps and linking contiguous ranges for {} path keys", path_key_ranges.len());
+    
+    // Wrap graph in Arc<Mutex> for thread-safe access
+    let graph_mutex = Arc::new(Mutex::new(combined_graph));
+
+    path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
+        trim_range_overlaps(ranges, &graph_mutex);
+        link_contiguous_ranges(ranges, &graph_mutex);
+    });
+
+    // Unwrap the graph from Arc<Mutex>
+    let mut combined_graph = Arc::try_unwrap(graph_mutex)
+        .ok()
+        .expect("Failed to unwrap graph mutex")
+        .into_inner()
+        .unwrap();
+
+    info!("Created {} nodes and {} edges", combined_graph.node_count, combined_graph.edges.len());
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&combined_graph, &path_key_ranges, &args.output, args.fill_gaps, &fasta_reader, args.verbose > 1) {
-        Ok(_) => info!("Successfully wrote the combined graph to {}", args.output),
+    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_reader, args.verbose > 1) {
+        Ok(_) => info!("Successfully wrote the combined graph to {} ({:?} format)", args.output, compression_format),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
 
     // log_memory_usage("end");
 }
 
+// Compact edge representation using bit-packed orientations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CompactEdge {
+    // Use top 2 bits for orientations, rest for node IDs
+    from: u64, // bit 63: orientation, bits 0-62: node ID
+    to: u64,   // bit 63: orientation, bits 0-62: node ID
+}
+
+impl CompactEdge {
+    const ORIENT_MASK: u64 = 1u64 << 63;
+    const ID_MASK: u64 = !Self::ORIENT_MASK;
+
+    fn new(from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> Self {
+        let from = from_id | (if from_rev { Self::ORIENT_MASK } else { 0 });
+        let to = to_id | (if to_rev { Self::ORIENT_MASK } else { 0 });
+        CompactEdge { from, to }
+    }
+
+    fn from_id(&self) -> u64 { self.from & Self::ID_MASK }
+    fn from_rev(&self) -> bool { (self.from & Self::ORIENT_MASK) != 0 }
+    fn to_id(&self) -> u64 { self.to & Self::ID_MASK }
+    fn to_rev(&self) -> bool { (self.to & Self::ORIENT_MASK) != 0 }
+}
+
+// Sequence storage with memory mapping
+struct SequenceStore {
+    sequences_file: File,
+    offsets: Vec<(u64, u32)>, // (offset, length) for each node
+}
+
+impl SequenceStore {
+    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+        let temp_file = if let Some(dir) = temp_dir {
+            NamedTempFile::new_in(dir)?
+        } else {
+            NamedTempFile::new()?
+        };
+        
+        let sequences_file = temp_file.into_file();
+        
+        Ok(SequenceStore {
+            sequences_file,
+            offsets: Vec::new(),
+        })
+    }
+
+    fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
+        let offset = self.sequences_file.seek(SeekFrom::End(0))?;
+        self.sequences_file.write_all(seq)?;
+        
+        let idx = self.offsets.len();
+        self.offsets.push((offset, seq.len() as u32));
+        Ok(idx)
+    }
+
+    fn get_sequence(&mut self, idx: usize) -> io::Result<Vec<u8>> {
+        if idx >= self.offsets.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid sequence index"));
+        }
+        
+        let (offset, length) = self.offsets[idx];
+        let mut buffer = vec![0u8; length as usize];
+        
+        self.sequences_file.seek(SeekFrom::Start(offset))?;
+        self.sequences_file.read_exact(&mut buffer)?;
+        
+        Ok(buffer)
+    }
+}
+
+// Simplified graph structure
+struct CompactGraph {
+    node_count: u64,
+    edges: FxHashSet<CompactEdge>,
+    sequence_store: SequenceStore
+}
+
+impl CompactGraph {
+    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+        Ok(CompactGraph {
+            node_count: 0,
+            edges: FxHashSet::default(),
+            sequence_store: SequenceStore::new(temp_dir)?
+        })
+    }
+
+    fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
+        self.sequence_store.add_sequence(seq)?;
+        self.node_count += 1;
+        Ok(self.node_count) // Return the actual node ID (1-based as per handlegraph convention)
+    }
+
+    fn add_edge(&mut self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) {
+        self.edges.insert(CompactEdge::new(from_id, from_rev, to_id, to_rev));
+    }
+
+    fn has_edge(&self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> bool {
+        // Check for the edge in both directions since handlegraph edges are bidirectional
+        let edge1 = CompactEdge::new(from_id, from_rev, to_id, to_rev);
+        let edge2 = CompactEdge::new(to_id, !to_rev, from_id, !from_rev);
+        self.edges.contains(&edge1) || self.edges.contains(&edge2)
+    }
+
+    fn get_sequence(&mut self, handle: Handle) -> io::Result<Vec<u8>> {
+        let seq = self.sequence_store.get_sequence((u64::from(handle.id()) - 1) as usize)?;
+        Ok(if handle.is_reverse() {
+            reverse_complement(&seq)
+        } else {
+            seq
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RangeInfo {
     start: usize,
     end: usize,
-    gfa_id: usize,
+    //gfa_id: usize,          // GFA file ID this range belongs to
     steps: Vec<Handle>,     // Path steps for this range
-    step_ends: Vec<usize>,  // End positions of each step (start is either the range start (for index 0) or the previous step's end position)
 }
 impl RangeInfo {
     /// Returns true if this range is immediately followed by another range
     /// with no gap between them
+    #[inline]
     fn is_contiguous_with(&self, other: &Self) -> bool {
         self.end == other.start
     }
 
     /// Returns true if this range overlaps with another range
     /// Two ranges overlap if one starts before the other ends
+    #[inline]
     fn overlaps_with(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }
@@ -171,156 +368,189 @@ impl RangeInfo {
 fn read_gfa_files(
     gfa_list: &[String],
     temp_dir: Option<&str>,
-) -> (HashGraph, FxHashMap<String, Vec<RangeInfo>>) {
-    let mut combined_graph = HashGraph::new();
-    let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
-    let mut id_translations = Vec::new();
+) -> io::Result<(CompactGraph, FxHashMap<String, Vec<RangeInfo>>)> {
+    // Shared structures protected by Mutex, wrapped in Arc for thread‑safe sharing
+    let combined_graph = Arc::new(Mutex::new(CompactGraph::new(temp_dir)?));
+    let path_key_ranges: Arc<Mutex<FxHashMap<String, Vec<RangeInfo>>>> =
+        Arc::new(Mutex::new(FxHashMap::default()));
 
-    info!("Reading {} GFA files", gfa_list.len());
+    // Cheap thread‑safe counters just for stats
+    let num_path_ranges = AtomicUsize::new(0);
+    let num_path_range_steps = AtomicUsize::new(0);
 
-    // Process each GFA file
-    let parser = GFAParser::new();
-    for (gfa_id, gfa_path) in gfa_list.iter().enumerate() {
-        let gfa = read_gfa(gfa_path, &parser, temp_dir).unwrap();
-        let block_graph = HashGraph::from_gfa(&gfa);
+    // Process each file in parallel without loading everything in memory
+    gfa_list.par_iter().enumerate().for_each(|(gfa_id, gfa_path)| {
+        if let Ok(reader) = get_gfa_reader(gfa_path) {
+            let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+            let mut temp_edges: Vec<CompactEdge> = Vec::new();
 
-        // Record the id translation for this block
-        let id_translation = NodeId::from(combined_graph.node_count());
-        id_translations.push(id_translation);
+            let mut node_count = 0usize;
+            let mut edge_count = 0usize;
 
-        // Add nodes with translated IDs
-        for handle in block_graph.handles() {
-            let sequence = block_graph.sequence(handle).collect::<Vec<_>>();
-            let new_id = id_translation + handle.id().into();
-            combined_graph.create_handle(&sequence, new_id);
-        }
-
-        // Add edges with translated IDs
-        for edge in block_graph.edges() {
-            let translated_edge = Edge(
-                Handle::pack(id_translation + edge.0.id().into(), edge.0.is_reverse()),
-                Handle::pack(id_translation + edge.1.id().into(), edge.1.is_reverse())
-            );
-            combined_graph.create_edge(translated_edge);
-        }
-        
-        debug!("  GFA file {} ({}) processed: Added {} nodes and {} edges", gfa_id, gfa_path, block_graph.node_count(), block_graph.edge_count());
-
-        // Process paths and collect ranges with their steps
-        for (_path_id, path_ref) in block_graph.paths.iter() {
-            let path_name = String::from_utf8_lossy(&path_ref.name);
-            
-            if let Some((sample_hap_name, start, end)) = split_path_name(&path_name) {
-                // Get the path steps and translate their IDs
-                let mut translated_steps = Vec::new();
-                let mut step_ends = Vec::new();
-                let mut cumulative_pos = start;
-
-                for step in path_ref.nodes.iter() {
-                    let translated_id = id_translation + step.id().into();
-                    let translated_step = Handle::pack(translated_id, step.is_reverse());
-                    translated_steps.push(translated_step);
-
-                    // Record the end position of this step
-                    let node_seq = block_graph.sequence(*step).collect::<Vec<_>>();
-                    let node_length = node_seq.len();
-                    cumulative_pos += node_length;
-                    step_ends.push(cumulative_pos);
+            for line in reader.lines().flatten() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
                 }
 
-                if !translated_steps.is_empty() {
-                    path_key_ranges.entry(sample_hap_name)
-                    .or_default()
-                    .push(RangeInfo { 
-                        start, 
-                        end, 
-                        gfa_id,
-                        steps: translated_steps,
-                        step_ends,
-                    });
-                } else {
-                    warn!("    Path '{}' has no steps", path_name);
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.is_empty() {
+                    continue;
+                }
+
+                match fields[0] {
+                    "S" => {
+                        // Segment line: S <sid> <seq> [<tag>]*
+                        if fields.len() < 3 {
+                            warn!("Invalid S line: {}", line);
+                            continue;
+                        }
+                        let node_id: u64 = fields[1].parse().unwrap_or_else(|_| {
+                            panic!("Invalid node ID: {}", fields[1]);
+                        });
+                        let sequence = fields[2].as_bytes();
+
+                        // one node at a time – keeps memory low
+                        let new_node_id = {
+                            let mut graph = combined_graph.lock().unwrap();
+                            graph.add_node(sequence).unwrap()
+                        };
+                        id_translation.insert(NodeId::from(node_id), NodeId::from(new_node_id));
+                        node_count += 1;
+                    }
+                    "L" => {
+                        // Link line: L <sid1> <orient1> <sid2> <orient2> <overlap>
+                        if fields.len() < 6 {
+                            warn!("Invalid L line: {}", line);
+                            continue;
+                        }
+
+                        let from_id: u64 = fields[1].parse().unwrap_or_else(|_| {
+                            panic!("Invalid from node ID: {}", fields[1]);
+                        });
+                        let from_rev = fields[2] == "-";
+                        let to_id: u64 = fields[3].parse().unwrap_or_else(|_| {
+                            panic!("Invalid to node ID: {}", fields[3]);
+                        });
+                        let to_rev = fields[4] == "-";
+                        temp_edges.push(CompactEdge::new(from_id, from_rev, to_id, to_rev));
+                        edge_count += 1;
+                    }
+                    "P" => {
+                        // Path line: P <pname> <nodes> <overlaps>
+                        if fields.len() < 3 {
+                            warn!("Invalid P line: {}", line);
+                            continue;
+                        }
+                        let path_name = fields[1];
+                        let nodes_str = fields[2];
+
+                        if let Some((sample_hap_name, start, end)) = split_path_name(path_name) {
+                            // Parse path steps
+                            let mut translated_steps = Vec::new();
+                            for step_str in nodes_str.split(',') {
+                                if step_str.is_empty() {
+                                    continue;
+                                }
+                                let (node_str, orient) = if step_str.ends_with('+') {
+                                    (&step_str[..step_str.len() - 1], false)
+                                } else if step_str.ends_with('-') {
+                                    (&step_str[..step_str.len() - 1], true)
+                                } else {
+                                    warn!("Invalid step format: {}", step_str);
+                                    continue;
+                                };
+
+                                let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
+                                    panic!("Invalid node ID in path: {}", node_str);
+                                });
+
+                                // Use the translation map to get the new node ID
+                                if let Some(&translated_id) = id_translation.get(&NodeId::from(node_id)) {
+                                    translated_steps.push(Handle::pack(translated_id, orient));
+                                } else {
+                                    warn!("Node {} in path {} not found in translation map", node_id, path_name);
+                                }
+                            }
+                            if !translated_steps.is_empty() {
+                                num_path_ranges.fetch_add(1, Ordering::Relaxed);
+                                num_path_range_steps.fetch_add(translated_steps.len(), Ordering::Relaxed);
+
+                                let mut map = path_key_ranges.lock().unwrap();
+                                map.entry(sample_hap_name.to_string())
+                                    .or_default()
+                                    .push(RangeInfo {
+                                        start,
+                                        end,
+                                        steps: translated_steps,
+                                    });
+                            }
+                        }
+                    }
+                    _ => {
+                        // Skip other line types (H, C, etc.)
+                    }
                 }
             }
+
+            // Add edges with translated IDs
+            for edge in temp_edges {
+                if let (Some(&from_id), Some(&to_id)) = (
+                    id_translation.get(&NodeId::from(edge.from_id())),
+                    id_translation.get(&NodeId::from(edge.to_id())),
+                ) {
+                    let mut graph = combined_graph.lock().unwrap();
+                    graph.add_edge(from_id.into(), edge.from_rev(), to_id.into(), edge.to_rev());
+                }
+            }
+
+            debug!(
+                "GFA file {} ({}) processed: {} nodes, {} edges",
+                gfa_id, gfa_path, node_count, edge_count
+            );
+        } else {
+            error!("Failed to open GFA file '{}'", gfa_path);
         }
-    }
+    });
 
-    info!("Collected {} nodes, {} edges, and {} path keys",
-        combined_graph.node_count(), combined_graph.edge_count(), path_key_ranges.len());
+    // Unwrap the Arc/Mutex wrappers now that all threads have finished
+    let graph = Arc::try_unwrap(combined_graph)
+        .ok()
+        .expect("More than one Arc pointer to graph")
+        .into_inner()
+        .unwrap();
+    let path_map = Arc::try_unwrap(path_key_ranges)
+        .ok()
+        .expect("More than one Arc pointer to path map")
+        .into_inner()
+        .unwrap();
 
-    (combined_graph, path_key_ranges)
+    info!(
+        "Collected {} nodes, {} edges, {} path keys, {} path ranges and {} path steps",
+        graph.node_count,
+        graph.edges.len(),
+        path_map.len(),
+        num_path_ranges.load(Ordering::Relaxed),
+        num_path_range_steps.load(Ordering::Relaxed)
+    );
+
+    Ok((graph, path_map))
 }
 
-fn read_gfa(gfa_path: &str, parser: &GFAParser<usize, ()>, temp_dir: Option<&str>) -> io::Result<GFA<usize, ()>> {
-    if gfa_path.ends_with(".gz") {
-        let file = std::fs::File::open(gfa_path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to open gzipped file '{}': {}", gfa_path, e)
-            )
-        })?;
-        
-        let (mut reader, _format) = niffler::get_reader(Box::new(file))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        
-        let mut decompressed = Vec::new();
-        reader.read_to_end(&mut decompressed).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to decompress file '{}': {}", gfa_path, e)
-            )
-        })?;
-        
-        // Create temporary file in the working directory if specified, otherwise in the same directory as the input file
-        let temp_dir = if let Some(work_dir) = temp_dir {
-            Path::new(work_dir)
-        } else {
-            Path::new(gfa_path).parent().unwrap_or(Path::new("."))
-        };
-        
-        // Create the directory if it doesn't exist
-        std::fs::create_dir_all(temp_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to create working directory '{}': {}", temp_dir.display(), e)
-            )
-        })?;
-        
-        let temp_file = NamedTempFile::new_in(temp_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to create temporary file in '{}': {}", temp_dir.display(), e)
-            )
-        })?;
-        
-        // Write decompressed data
-        temp_file.as_file().write_all(&decompressed).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Failed to write to temporary file: {}", e)
-            )
-        })?;
-        
-        // Parse GFA
-        parser.parse_file(temp_file.path().to_str().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid temporary file path"
-            )
-        })?).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse GFA: {}", e)
-            )
-        })
-    } else {
-        parser.parse_file(gfa_path).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse GFA file '{}': {}", gfa_path, e)
-            )
-        })
-    }
+fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
+    let file = std::fs::File::open(gfa_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("Failed to open file '{}': {}", gfa_path, e)
+        )
+    })?;
+    
+    // Use niffler to handle both compressed and uncompressed files
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open reader for '{}': {}", gfa_path, e)))?;
+    
+    // Return a BufReader wrapping the niffler reader
+    Ok(Box::new(BufReader::new(reader)))
 }
 
 fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
@@ -341,21 +571,12 @@ fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
 }
 
 fn sort_and_filter_ranges(
-    path_key: &str,
     ranges: &mut Vec<RangeInfo>,
-    debug: bool
 ) {
     // Sort ranges by start position
     ranges.sort_by_key(|r| (r.start, r.end));
 
-    if debug {
-        debug!("  Path key '{}' at the beginning", path_key);
-        for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-        }
-
-        debug!("  Removing redundant ranges");
-    }
+    debug!("  Removing redundant ranges");
 
     // Remove ranges that are contained within other ranges
     let mut write_idx = 0;
@@ -428,24 +649,20 @@ fn sort_and_filter_ranges(
     }
     ranges.truncate(write_idx + 1);
     
-    if debug {
-        debug!("  Path key '{}' without redundancy", path_key);
-        for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-        }
-    }
+    // if debug {
+    //     debug!("  Path key '{}' without redundancy", path_key);
+    //     for range in ranges.iter() {
+    //         //debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
+    //         debug!("    Range: start={}, end={}, num.steps={}", range.start, range.end, range.steps.len());
+    //     }
+    // }
 }
 
 fn trim_range_overlaps(
-    path_key: &str,
     ranges: &mut [RangeInfo],
-    combined_graph: &mut HashGraph,
-    debug: bool
+    graph_mutex: &Arc<Mutex<CompactGraph>>,
 ) {
-    // Trim overlaps
     debug!("  Trimming overlapping ranges");
-
-    let mut next_node_id_value = u64::from(combined_graph.max_node_id()) + 1;
 
     for i in 1..ranges.len() {
         let (left, right) = ranges.split_at_mut(i);
@@ -465,62 +682,65 @@ fn trim_range_overlaps(
             // Adjust r2 to remove the overlap
             let mut steps_to_remove = Vec::new();
             let mut step_to_split: Option<usize> = None;
-            for (idx, &step_end) in r2.step_ends.iter().enumerate() {
-                let step_start = if idx == 0 { r2.start } else { r2.step_ends[idx - 1] };
-                if step_end <= overlap_start {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] before overlap", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    continue;
-                } else if step_start >= overlap_end {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] after overlap", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    break;
-                } else if step_start >= overlap_start && step_end <= overlap_end {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] fully overlaps", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    steps_to_remove.push(idx);
-                } else {
-                    // if debug && r2.start == 11000 {
-                    //     debug!("    Step {} [start={}, end={}, len={}] partially overlaps", idx, step_start, step_end, step_end - step_start);
-                    // }
-                    if step_to_split.is_some() {
-                        panic!("Error: More than one step is partially overlapping, which is not allowed.");
-                    }
-                    step_to_split = Some(idx);
-                }
-            }
+            let mut cumulative_pos = r2.start;
 
-            // if debug && r2.start == 11000 {
-            //     debug!("    Total steps to remove: {}", steps_to_remove.len());
-            //     debug!("    Step to split: {:?}", step_to_split);   
-            // }
+            // First pass: identify steps to remove/split (read-only, brief lock)
+            {
+                let mut graph = graph_mutex.lock().unwrap();
+                for (idx, &step_handle) in r2.steps.iter().enumerate() {
+                    let step_start = cumulative_pos;
+                    let node_seq = graph.get_sequence(step_handle).unwrap();
+                    let node_length = node_seq.len();
+                    cumulative_pos += node_length;
+                    let step_end = cumulative_pos;
+
+                    if step_end <= overlap_start {
+                        continue;
+                    } else if step_start >= overlap_end {
+                        break;
+                    } else if step_start >= overlap_start && step_end <= overlap_end {
+                        steps_to_remove.push(idx);
+                    } else {
+                        if step_to_split.is_some() {
+                            panic!("Error: More than one step is partially overlapping, which is not allowed.");
+                        }
+                        step_to_split = Some(idx);
+                    }
+                }
+            } // Lock released here
 
             // Initialize new vectors to store updated steps
             let mut new_steps = Vec::with_capacity(r2.steps.len() / 2);
-            let mut new_step_ends = Vec::with_capacity(r2.steps.len() / 2);
             let mut range_new_start = None;
+            let mut current_pos = None;
 
-            // Iterate over the original steps
-            for idx in 0..r2.steps.len() {
-                let step_handle = r2.steps[idx];
-                let step_start = if idx == 0 { r2.start } else { r2.step_ends[idx - 1] };
-                let step_end = r2.step_ends[idx];
+            // Reset cumulative position for second pass
+            cumulative_pos = r2.start;
+
+            // Second pass: Iterate over the original steps using incrementally computed positions
+            for (idx, &step_handle) in r2.steps.iter().enumerate() {
+                let step_start = cumulative_pos;
+                
+                // Get node sequence with lock
+                let node_seq = {
+                    let mut graph = graph_mutex.lock().unwrap();
+                    graph.get_sequence(step_handle).unwrap()
+                }; // Lock released here
+                
+                let node_length = node_seq.len();
+                cumulative_pos += node_length;
+                let step_end = cumulative_pos;
 
                 if steps_to_remove.contains(&idx) {
                     // Skip steps to remove
                     continue;
                 } else if step_to_split == Some(idx) {
                     // Split node for the single partially overlapping step
-                    let node_seq = combined_graph.sequence(step_handle).collect::<Vec<_>>();
                     let overlap_within_step_start = std::cmp::max(step_start, overlap_start);
                     let overlap_within_step_end = std::cmp::min(step_end, overlap_end);
                     
                     // Calculate offsets relative to the node sequence
                     let node_len = node_seq.len();
-                    // Calculate offsets consistently regardless of strand
                     let overlap_start_offset = (overlap_within_step_start - step_start).min(node_len);
                     let overlap_end_offset = (overlap_within_step_end - step_start).min(node_len);
 
@@ -533,15 +753,19 @@ fn trim_range_overlaps(
 
                         // Keep left part
                         let new_seq = node_seq[0..overlap_start_offset].to_vec();
-
-                        let node_id = NodeId::from(next_node_id_value);
-                        next_node_id_value += 1;
-                        let new_node = combined_graph.create_handle(&new_seq, node_id);
+                        
+                        // Add node with lock
+                        let node_id = {
+                            let mut graph = graph_mutex.lock().unwrap();
+                            graph.add_node(&new_seq).unwrap()
+                        }; // Lock released here
+                        
+                        let new_node = Handle::pack(NodeId::from(node_id), false);
 
                         new_steps.push(new_node);
-                        new_step_ends.push(overlap_start);
                         if range_new_start.is_none() {
                             range_new_start = Some(step_start);
+                            current_pos = Some(step_start);
                         }
                     } else if step_end > overlap_end {
                         debug!("      Adding right part of step [start={}, end={}]", overlap_within_step_end, step_end);
@@ -549,45 +773,66 @@ fn trim_range_overlaps(
 
                         // Keep right part
                         let new_seq = node_seq[overlap_end_offset..].to_vec();
-
-                        let node_id = NodeId::from(next_node_id_value);
-                        next_node_id_value += 1;
-                        let new_node = combined_graph.create_handle(&new_seq, node_id);
+                        
+                        // Add node with lock
+                        let node_id = {
+                            let mut graph = graph_mutex.lock().unwrap();
+                            graph.add_node(&new_seq).unwrap()
+                        }; // Lock released here
+                        
+                        let new_node = Handle::pack(NodeId::from(node_id), false);
 
                         new_steps.push(new_node);
-                        new_step_ends.push(step_end);
                         if range_new_start.is_none() {
                             range_new_start = Some(overlap_end);
+                            current_pos = Some(overlap_end);
                         }
+                        current_pos = Some(current_pos.unwrap() + new_seq.len());
                     }
                 } else {
                     // Keep steps that are not to be removed or split
                     new_steps.push(step_handle);
-                    new_step_ends.push(step_end);
                     if range_new_start.is_none() {
                         range_new_start = Some(step_start);
+                        current_pos = Some(step_start);
                     }
+                    current_pos = Some(current_pos.unwrap() + node_length);
                 }
             }
 
             // Update r2 with the new steps
             r2.steps = new_steps;
-            r2.step_ends = new_step_ends;
 
             // Update edges for the modified steps
             for idx in 0..r2.steps.len() {
                 if idx > 0 {
                     let prev_step = r2.steps[idx - 1];
-                    if !combined_graph.has_edge(prev_step, r2.steps[idx]) {
-                        combined_graph.create_edge(Edge(prev_step, r2.steps[idx]));
+                    let curr_step = r2.steps[idx];
+                    
+                    // Check and add edge with lock
+                    let mut graph = graph_mutex.lock().unwrap();
+                    if !graph.has_edge(
+                        prev_step.id().into(),
+                        prev_step.is_reverse(),
+                        curr_step.id().into(),
+                        curr_step.is_reverse()
+                    ) {
+                        debug!("      Creating edge between steps: {} -> {}", prev_step.id(), curr_step.id());
+                        graph.add_edge(
+                            prev_step.id().into(),
+                            prev_step.is_reverse(),
+                            curr_step.id().into(),
+                            curr_step.is_reverse()
+                        );
                     }
+                    // Lock released at end of scope
                 }
             }
 
             // Update r2.start and r2.end based on the new step positions
-            if !r2.step_ends.is_empty() {
-                r2.start = range_new_start.unwrap();  // Safe because if we have positions, we must have set range_new_start
-                r2.end = *r2.step_ends.last().unwrap();
+            if !r2.steps.is_empty() {
+                r2.start = range_new_start.unwrap();
+                r2.end = current_pos.unwrap();
             } else {
                 // If no steps remain, set start and end to overlap_end to effectively remove this range
                 r2.start = overlap_end;
@@ -597,172 +842,51 @@ fn trim_range_overlaps(
             debug!("      Updated overlaps: Range2 [start={}, end={}]", r2.start, r2.end);
         }
     }
-
-    if debug {
-        debug!("  Path key '{}' without overlaps", path_key);
-        for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
-        }
-    }
 }
 
 fn link_contiguous_ranges(
-    path_key: &str,
-    ranges: &mut [RangeInfo],
-    combined_graph: &mut HashGraph,
-    debug: bool
+    ranges: &[RangeInfo],
+    graph_mutex: &Arc<Mutex<CompactGraph>>,
 ) {
     // Trim overlaps
     debug!("  Linking contiguous ranges");
 
     for i in 1..ranges.len() {
-        let (left, right) = ranges.split_at_mut(i);
-        let r1 = &mut left[left.len()-1];
-        let r2 = &mut right[0];
+        let r1 = &ranges[i-1];
+        let r2 = &ranges[i];
 
         // Check if ranges are contiguous
         if r1.is_contiguous_with(r2) {
             // Get last handle from previous range and first handle from current range
             if let (Some(&last_handle), Some(&first_handle)) = (r1.steps.last(), r2.steps.first()) {
-                // Create edge if it doesn't exist
-                if !combined_graph.has_edge(last_handle, first_handle) {
-                    combined_graph.create_edge(Edge(last_handle, first_handle));
-                    debug!("    Created edge between contiguous ranges at position {}", r1.end);
+                // Lock only for checking and adding edge
+                let mut graph = graph_mutex.lock().unwrap();
+                if !graph.has_edge(
+                    last_handle.id().into(),
+                    last_handle.is_reverse(),
+                    first_handle.id().into(),
+                    first_handle.is_reverse()
+                ) {
+                    debug!("    Creating edge between contiguous ranges at position {}: {} -> {}", r1.end, last_handle.id(), first_handle.id());
+                    graph.add_edge(
+                        last_handle.id().into(),
+                        last_handle.is_reverse(),
+                        first_handle.id().into(),
+                        first_handle.is_reverse()
+                    );
                 }
+                // Lock released at end of scope
             }
-        }
-    }
-
-    if debug {
-        debug!("  Path key '{}' without overlaps", path_key);
-        for range in ranges.iter() {
-            debug!("    Range: start={}, end={}, num.steps={}, gfa_id={}", range.start, range.end, range.steps.len(), range.gfa_id);
         }
     }
 }
 
-// fn create_paths_from_ranges(
-//     path_key: &str,
-//     ranges: &[RangeInfo],
-//     combined_graph: &mut HashGraph,
-//     debug: bool
-// ) {
-//     // Check for overlaps and contiguity
-//     let mut all_contiguous = true;
-    
-//     for window in ranges.windows(2) {
-//         let r1 = &window[0];
-//         let r2 = &window[1];
-
-//         if r1.overlaps_with(r2) {
-//             if debug {
-//                 debug!("Unresolved overlaps detected between ranges: [start={}, end={}] and [start={}, end={}]", 
-//                 r1.start, r1.end, r2.start, r2.end);
-//             }
-//             panic!("Unresolved overlaps detected in path key '{}'", path_key);
-//         }
-//         if !r1.is_contiguous_with(r2) {
-//             all_contiguous = false;
-//         }
-//     }
-            
-//     if !all_contiguous && debug {
-//         let mut current_start = ranges[0].start;
-//         let mut current_end = ranges[0].end;
-        
-//         for i in 1..ranges.len() {
-//             if ranges[i-1].is_contiguous_with(&ranges[i]) {
-//                 // Extend current merged range
-//                 current_end = ranges[i].end;
-//             } else {
-//                 // Print current merged range
-//                 debug!("    Merged range: start={}, end={}", 
-//                     current_start, current_end);
-                
-//                 if !ranges[i-1].overlaps_with(&ranges[i]) {
-//                     // Calculate and print gap
-//                     let gap = ranges[i].start - current_end;
-//                     debug!("      Gap to next range: {} positions", gap);
-//                 } else {
-//                     // Calculate and print overlap
-//                     let overlap = current_end - ranges[i].start;
-//                     debug!("      Overlap with next range: {} positions", overlap);
-//                 }
-
-//                 // Start new merged range
-//                 current_start = ranges[i].start;
-//                 current_end = ranges[i].end;
-//             }
-//         }
-        
-//         // Print final merged range
-//         debug!("    Merged range: start={}, end={}", 
-//             current_start, current_end);
-//     }
-
-//     if all_contiguous {
-//         // Create a single path with the original key
-//         let path_id = combined_graph.create_path(path_key.as_bytes(), false).unwrap();
-//         let mut prev_step = None;
-        
-//         // Add all steps from all ranges
-//         for range in ranges.iter() {
-//             for step in &range.steps {
-//                 combined_graph.path_append_step(path_id, *step);
-                
-//                 if let Some(prev) = prev_step {
-//                     if !combined_graph.has_edge(prev, *step) {
-//                         combined_graph.create_edge(Edge(prev, *step));
-//                     }
-//                 }
-//                 prev_step = Some(*step);
-//             }
-//         }
-//     } else {
-//         // Handle non-contiguous ranges by creating separate paths for each contiguous group
-//         let mut current_range_idx = 0;
-//         while current_range_idx < ranges.len() {
-//             let start_range = &ranges[current_range_idx];
-//             let mut steps = start_range.steps.clone();
-//             let mut next_idx = current_range_idx + 1;
-//             let mut end_range = start_range;
-            
-//             // Merge contiguous ranges
-//             while next_idx < ranges.len() && ranges[next_idx - 1].is_contiguous_with(&ranges[next_idx]) {
-//                 steps.extend(ranges[next_idx].steps.clone());
-//                 end_range = &ranges[next_idx];
-//                 next_idx += 1;
-//             }
-            
-//             // Create path name with range information
-//             let path_name = format!("{}:{}-{}", path_key, start_range.start, end_range.end);
-//             let path_id = combined_graph.create_path(path_name.as_bytes(), false).unwrap();
-            
-//             // Add steps to the path
-//             let mut prev_step = None;
-//             for step in steps {
-//                 combined_graph.path_append_step(path_id, step);
-                
-//                 if let Some(prev) = prev_step {
-//                     if !combined_graph.has_edge(prev, step) {
-//                         combined_graph.create_edge(Edge(prev, step));
-//                     }
-//                 }
-//                 prev_step = Some(step);
-//             }
-            
-//             current_range_idx = next_idx;
-//         }
-//     }
-// }
-
 fn mark_nodes_for_removal(
-    graph: &HashGraph,
+    node_count: u64,
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>
 ) -> BitVec {
     // Create a bitvector with all nodes initially marked for removal
-    let max_node_id = u64::from(graph.max_node_id());
-    let mut nodes_to_remove = bitvec![1; max_node_id as usize + 1];
+    let mut nodes_to_remove = bitvec![1; node_count as usize + 1]; // +1 to account for 0-indexing
     
     // Mark nodes used in path ranges as not to be removed (set bit to 0)
     for ranges in path_key_ranges.values() {
@@ -777,58 +901,102 @@ fn mark_nodes_for_removal(
 }
 
 fn write_graph_to_gfa(
-    graph: &HashGraph, 
+    combined_graph: &mut CompactGraph, 
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
     output_path: &str,
+    compression_format: Format,
     fill_gaps: u8,
     fasta_reader: &Option<faidx::Reader>,
     debug: bool
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
-    let nodes_to_remove : BitVec = mark_nodes_for_removal(graph, path_key_ranges);    
-    debug!("Marked {} nodes", nodes_to_remove.count_ones());
+    let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
+    debug!("Marked {} unused nodes", nodes_to_remove.count_ones());
     
-    let mut file = File::create(output_path)?;
+    // Create the output file
+    let output_file = File::create(output_path)?;
+    
+    // Create writer based on compression format
+    let writer: Box<dyn Write> = match compression_format {
+        Format::Gzip => {
+            // Use parallel gzip compression
+            let parz: ParCompress<Gzip> = ParCompressBuilder::new()
+                .num_threads(rayon::current_num_threads())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to set threads: {:?}", e)))?
+                .compression_level(flate2::Compression::new(6))
+                .from_writer(output_file);
+            Box::new(parz)
+        },
+        Format::Bzip => {
+            // Use parallel BGZF compression
+            let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
+                .num_threads(rayon::current_num_threads())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to set threads: {:?}", e)))?
+                .compression_level(flate2::Compression::new(6))
+                .from_writer(output_file);
+            Box::new(parz)
+        },
+        Format::Zstd => {
+            // Use multi-threaded zstd compression
+            let mut encoder = ZstdEncoder::new(output_file, 6)?;
+            encoder.multithread(rayon::current_num_threads() as u32)?;
+            Box::new(encoder)
+        },
+        Format::No => {
+            // No compression
+            Box::new(output_file)
+        },
+        _ => {
+            // Fallback to niffler for other formats
+            niffler::get_writer(
+                Box::new(output_file),
+                compression_format,
+                niffler::compression::Level::Six,
+            ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        }
+    };
+    
+    let mut file = BufWriter::new(writer);
     
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
-    
-    // Write nodes by exluding marked ones and create the id_mapping
+
+    // Write nodes by excluding marked ones and create the id_mapping
     info!("Writing used nodes by compacting their IDs");
-    let max_id = graph.node_count();
+    let max_id = combined_graph.node_count as usize;
     let mut id_mapping = vec![0; max_id + 1];
     let mut new_id = 1; // Start from 1
-    for handle in graph.handles() {
-        let node_id = usize::from(handle.id());
-        if !nodes_to_remove[node_id] {
-            id_mapping[node_id] = new_id;
+    
+    for node_id in 1..=combined_graph.node_count {
+        if !nodes_to_remove[node_id as usize] {
+            id_mapping[node_id as usize] = new_id;
             
-            let sequence = graph.sequence(handle).collect::<Vec<_>>();
-            let sequence_str = String::from_utf8(sequence).unwrap_or_else(|_| String::from("N"));
+            let sequence = combined_graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
+            let sequence_str = String::from_utf8(sequence).expect("Node sequence contains invalid UTF-8");
             writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
             
             new_id += 1;
         }
     }
     
-    // Write edges by excluding those connected to marked nodes
     info!("Writing edges connecting used nodes");
-    for edge in graph.edges() {
-        if !nodes_to_remove[u64::from(edge.0.id()) as usize] && 
-           !nodes_to_remove[u64::from(edge.1.id()) as usize] 
-        {
-            let from_id = id_mapping[u64::from(edge.0.id()) as usize];
-            let to_id = id_mapping[u64::from(edge.1.id()) as usize];
-            let from_orient = if edge.0.is_reverse() { "-" } else { "+" };
-            let to_orient = if edge.1.is_reverse() { "-" } else { "+" };
-            writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_id, from_orient, to_id, to_orient)?;
+    for edge in &combined_graph.edges {
+        let from_id = edge.from_id() as usize;
+        let to_id = edge.to_id() as usize;
+        
+        if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
+            let from_mapped = id_mapping[from_id];
+            let to_mapped = id_mapping[to_id];
+            let from_orient = if edge.from_rev() { "-" } else { "+" };
+            let to_orient = if edge.to_rev() { "-" } else { "+" };
+            writeln!(file, "L\t{}\t{}\t{}\t{}\t0M", from_mapped, from_orient, to_mapped, to_orient)?;
         }
     }
 
     // Write paths by processing ranges directly
     info!("Writing paths by merging contiguous path ranges");
     let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
-    path_key_vec.sort(); // Sort path keys for consistent output
+    path_key_vec.par_sort_unstable(); // Sort path keys for consistent output (for path keys, the order of equal elements doesn't matter since they're unique)
 
     let mut start_gaps = 0;
     let mut middle_gaps = 0;
@@ -836,11 +1004,12 @@ fn write_graph_to_gfa(
 
     // Check if a valid FASTA reader is provided for end gap filling
     if fill_gaps == 2 && fasta_reader.is_none() {
-        warn!("Cannot fill end gaps without FASTA file");
+        warn!("Cannot fill end gaps without FASTA file; trailing gaps will be skipped");
     }
 
     for path_key in path_key_vec {
         let ranges = &path_key_ranges[path_key];
+        //if ranges.is_empty() { continue }
 
         if debug {
             debug!("Processing Path key '{}'", path_key);
@@ -874,125 +1043,115 @@ fn write_graph_to_gfa(
             }
             
             // Print final merged range
-            debug!("  Merged range: start={}, end={}", 
+            debug!("  Final merged range: start={}, end={}", 
                 current_start, current_end);
         }
 
-        let mut current_range_idx = 0;
+        let mut path_elements: Vec<String> = Vec::new();
+        let mut path_start = ranges[0].start;
+        let mut path_end   = ranges[0].start;
 
-        while current_range_idx < ranges.len() {
-            let start_range = &ranges[current_range_idx];
-            let mut next_idx = current_range_idx + 1;
-            let mut end_range = start_range;
-            
-            // Initialize path elements vector
-            let mut path_elements = Vec::new();
+        // Handle initial gap if it exists and gap filling is enabled
+        if fill_gaps == 2 && ranges[0].start > 0 {
+            start_gaps += 1;
+            path_elements.push(create_gap_node(
+                &mut file,
+                (0, ranges[0].start),
+                path_key,
+                fasta_reader,
+                None, // No previous element for initial gap
+                ranges[0].steps.first(),
+                &id_mapping,
+                &mut new_id,
+            )?);
+            path_start = 0;
+        }
 
-            // Handle initial gap if it exists and gap filling is enabled
-            if fill_gaps == 2 && start_range.start > 0 {
-                start_gaps += 1;
+        // Process subsequent contiguous ranges or add gap nodes
+        let mut i = 0;
+        while i < ranges.len() {
+            // Merge a block of contiguous ranges
+            add_range_steps_to_path(&ranges[i], &id_mapping, &mut path_elements);
+            let mut last_range_end = ranges[i].end;
+            i += 1;
 
-                let gap_element = create_gap_node(
-                    &mut file,
-                    (0, start_range.start),
-                    path_key,
-                    fasta_reader,
-                    None, // No previous element for initial gap
-                    start_range.steps.first(),
-                    &id_mapping,
-                    &mut new_id,
-                )?;
-                path_elements.push(gap_element);
+            while i < ranges.len() && ranges[i-1].is_contiguous_with(&ranges[i]) {
+                add_range_steps_to_path(&ranges[i], &id_mapping, &mut path_elements);
+                last_range_end = ranges[i].end;
+                i += 1;
             }
+            path_end = last_range_end;
 
-            // Add first range steps
-            add_range_steps_to_path(start_range, &id_mapping, &mut path_elements);
-            
-            // Process subsequent contiguous ranges or add gap nodes
-            while next_idx < ranges.len() {
-                let next_range = &ranges[next_idx];
+            // We're now at the end of a contiguous block
+            if i < ranges.len() { // there is a gap before the next block
+                let next_start = ranges[i].start;
 
-                if ranges[next_idx - 1].is_contiguous_with(next_range) {
-                    // Ranges are contiguous - add steps directly
-                    add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
-                    end_range = next_range;
-                    next_idx += 1;
-                } else if fill_gaps > 0 {
+                if fill_gaps > 0 {
+                    // Bridge the gap
                     middle_gaps += 1;
 
-                    // Fill gap between ranges
-                    let gap_element = create_gap_node(
+                    path_elements.push(create_gap_node(
                         &mut file,
-                        (end_range.end, next_range.start),
+                        (last_range_end, next_start),
                         path_key,
                         fasta_reader,
                         path_elements.last(),
-                        next_range.steps.first(),
+                        ranges[i].steps.first(),
                         &id_mapping,
                         &mut new_id,
-                    )?;
-                    path_elements.push(gap_element);
-
-                    // Continue addint stpes of the next range
-                    add_range_steps_to_path(next_range, &id_mapping, &mut path_elements);
-                    end_range = next_range;
-                    next_idx += 1;
+                    )?);
                 } else {
-                    // Not filling gaps - break and create new path
-                    break;
-                }
-            }
-
-            // Handle final gap if sequence length is known and gap filling is enabled
-            if fill_gaps == 2 {
-                // Get sequence length if FASTA is provided
-                if let Some(total_length) = fasta_reader.as_ref().map(|reader| reader.fetch_seq_len(path_key) as usize) {
-                    match end_range.end.cmp(&total_length) {
-                        std::cmp::Ordering::Less => {
-                            end_gaps += 1;
-                    
-                            let gap_element = create_gap_node(
-                                &mut file,
-                                (end_range.end, total_length),
-                                path_key,
-                                fasta_reader,
-                                path_elements.last(),
-                                None,  // No next node for final gap
-                                &id_mapping,
-                                &mut new_id,
-                            )?;
-                            path_elements.push(gap_element);
-                        }
-                        std::cmp::Ordering::Greater => {
-                            warn!("Path '{}' extends beyond sequence length ({} > {})", 
-                                path_key, end_range.end, total_length);
-                        }
-                        std::cmp::Ordering::Equal => {}
+                    // Finish current partial path and start a new one
+                    if !path_elements.is_empty() {
+                        let path_name = format!("{}:{}-{}", path_key, path_start, path_end);
+                        writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+                        path_elements.clear();
                     }
+                    path_start = next_start;
                 }
             }
+        }
 
-            // Write path
-            if !path_elements.is_empty() {
-                // Check if all ranges are contiguous, and path starts at position 0,
-                // and either no FASTA reader available or path extends to sequence end
-                let is_full_path = next_idx - current_range_idx == ranges.len() 
-                                    && start_range.start == 0
-                                    && fasta_reader.as_ref()
-                                        .map(|reader| reader.fetch_seq_len(path_key))
-                                        .map_or(true, |total_len| end_range.end >= total_len as usize);
+        // Handle final gap if it exists and gap filling is enabled
+        if fill_gaps == 2 {
+            // Get sequence length if FASTA is provided
+            if let Some(total_len) = fasta_reader.as_ref()
+                .map(|r| r.fetch_seq_len(path_key) as usize)
+            {
+                if path_end < total_len {
+                    end_gaps += 1;
 
-                let path_name = if is_full_path {
-                    path_key.to_string()
-                } else {
-                    // Create path name with range information
-                    format!("{}:{}-{}", path_key, start_range.start, end_range.end)
-                };
-                
-                writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
+                    path_elements.push(create_gap_node(
+                        &mut file,
+                        (path_end, total_len),
+                        path_key,
+                        fasta_reader,
+                        path_elements.last(),
+                        None,  // No next node for final gap
+                        &id_mapping,
+                        &mut new_id,
+                    )?);
+                    path_end = total_len;
+                } else if path_end > total_len {
+                    warn!("Path '{}' extends beyond sequence length ({} > {})",
+                        path_key, path_end, total_len);
+                }
             }
-            
-            current_range_idx = next_idx;
+        }
+
+        // Write the remaining path
+        if !path_elements.is_empty() {
+            let is_full_path = path_start == 0 &&
+                fasta_reader.as_ref()
+                    .map(|r| r.fetch_seq_len(path_key) as usize == path_end)
+                    .unwrap_or(false);
+
+            let path_name = if is_full_path {
+                path_key.to_string()
+            } else {
+                format!("{}:{}-{}", path_key, path_start, path_end)
+            };
+            writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
         }
     }
 
@@ -1006,11 +1165,12 @@ fn write_graph_to_gfa(
         info!("Filled {} middle gaps", middle_gaps);
     }
 
+    file.flush()?;
     Ok(())
 }
 
-fn create_gap_node(
-    file: &mut File,
+fn create_gap_node<W: Write>(
+    file: &mut BufWriter<W>,
     gap_range: (usize, usize),
     path_key: &str,
     fasta_reader: &Option<faidx::Reader>,
@@ -1075,13 +1235,12 @@ mod tests {
     use super::*;
 
     // Helper function to create a simple RangeInfo for testing
-    fn create_range_info(start: usize, end: usize, gfa_id: usize) -> RangeInfo {
+    fn create_range_info(start: usize, end: usize) -> RangeInfo {
         RangeInfo {
             start,
             end,
-            gfa_id,
+            //gfa_id,
             steps: vec![],            // Empty steps for testing
-            step_ends: vec![],   // Empty positions for testing
         }
     }
 
@@ -1091,78 +1250,78 @@ mod tests {
         let test_cases = vec![
             // Test case 1: Basic containment
             (
-                vec![(10, 50, 0), (20, 30, 1)],  // Input ranges (start, end, gfa_id)
-                vec![(10, 50, 0)],               // Expected result
+                vec![(10, 50), (20, 30)],  // Input ranges (start, end)
+                vec![(10, 50)],            // Expected result
                 "Basic containment"
             ),
             
             // Test case 2: No containment
             (
-                vec![(10, 20, 0), (30, 40, 1)],
-                vec![(10, 20, 0), (30, 40, 1)],
+                vec![(10, 20), (30, 40)],
+                vec![(10, 20), (30, 40)],
                 "No containment"
             ),
             
             // Test case 3: Multiple contained ranges
             (
-                vec![(10, 100, 0), (20, 30, 1), (40, 50, 2), (60, 70, 3)],
-                vec![(10, 100, 0)],
+                vec![(10, 100), (20, 30), (40, 50), (60, 70)],
+                vec![(10, 100)],
                 "Multiple contained ranges"
             ),
             
             // Test case 4: Identical ranges
             (
-                vec![(10, 20, 0), (10, 20, 1)],
-                vec![(10, 20, 0)],
+                vec![(10, 20), (10, 20)],
+                vec![(10, 20)],
                 "Identical ranges"
             ),
             
             // Test case 5: Nested containment
             (
-                vec![(10, 100, 0), (20, 80, 1), (30, 40, 2)],
-                vec![(10, 100, 0)],
+                vec![(10, 100), (20, 80), (30, 40)],
+                vec![(10, 100)],
                 "Nested containment"
             ),
             
             // Test case 6: Partial overlap (should keep both)
             (
-                vec![(10, 30, 0), (20, 40, 1)],
-                vec![(10, 30, 0), (20, 40, 1)],
+                vec![(10, 30), (20, 40)],
+                vec![(10, 30), (20, 40)],
                 "Partial overlap"
             ),
             
             // Test case 7: Edge cases - touching ranges
             (
-                vec![(10, 20, 0), (20, 30, 1)],
-                vec![(10, 20, 0), (20, 30, 1)],
+                vec![(10, 20), (20, 30)],
+                vec![(10, 20), (20, 30)],
                 "Touching ranges"
             ),
 
             // Test case 8: Overlapping ranges from same GFA
             (
-                vec![(0, 11742, 0), (9714, 13000, 1), (11000, 19000, 1)],
-                vec![(0, 11742, 0), (11000, 19000, 1)],
+                vec![(0, 11742), (9714, 13000), (11000, 19000)],
+                vec![(0, 11742), (11000, 19000)],
                 "Overlapping ranges from same GFA"
             ),
 
             // Test case 9: Overlapping ranges with different GFA IDs
             (
-                vec![(0, 11742, 0), (9714, 13000, 1), (11000, 19000, 2)],
-                vec![(0, 11742, 0), (11000, 19000, 2)],
+                vec![(0, 11742), (9714, 13000), (11000, 19000)],
+                vec![(0, 11742), (11000, 19000)],
                 "Overlapping ranges"
             ),
 
             // Test case 10: Overlapping ranges with different GFA IDs 2
             (
-                vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
-                vec![(0, 10, 0), (8, 20, 1), (15, 30, 2)],
+                vec![(0, 10), (8, 20), (15, 30)],
+                vec![(0, 10), (8, 20), (15, 30)],
                 "Overlapping ranges"
             ),
 
             // Test case 11: Overlapping ranges with different GFA IDs 3
             (
-                vec![(8000, 11000, 0), (9694, 12313, 1), (10908, 13908, 2)],
-                vec![(8000, 11000, 0), (10908, 13908, 2)],
+                vec![(8000, 11000), (9694, 12313), (10908, 13908)],
+                vec![(8000, 11000), (10908, 13908)],
                 "Overlapping ranges"
             ),
         ];
@@ -1174,7 +1333,7 @@ mod tests {
             // Create input ranges
             let mut ranges: Vec<RangeInfo> = input_ranges
                 .iter()
-                .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
+                .map(|(start, end)| create_range_info(*start, *end))
                 .collect();
 
             // Sort ranges by start position
@@ -1233,7 +1392,7 @@ mod tests {
             // Create expected ranges
             let expected: Vec<RangeInfo> = expected_ranges
                 .iter()
-                .map(|(start, end, gfa_id)| create_range_info(*start, *end, *gfa_id))
+                .map(|(start, end)| create_range_info(*start, *end))
                 .collect();
 
             // Compare results
@@ -1246,8 +1405,8 @@ mod tests {
 
             for (i, (result, expected)) in ranges.iter().zip(expected.iter()).enumerate() {
                 assert_eq!(
-                    (result.start, result.end, result.gfa_id),
-                    (expected.start, expected.end, expected.gfa_id),
+                    (result.start, result.end),
+                    (expected.start, expected.end),
                     "Test case '{}': Mismatch at position {}",
                     case_name,
                     i
