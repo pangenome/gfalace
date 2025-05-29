@@ -911,7 +911,7 @@ fn write_graph_to_gfa(
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
     let nodes_to_remove = mark_nodes_for_removal(combined_graph.node_count, path_key_ranges);    
-    debug!("Marked {} unused nodes", nodes_to_remove.count_ones());
+    debug!("Marked {} unused nodes", nodes_to_remove.count_ones() - 1);
     
     // Create the output file
     let output_file = File::create(output_path)?;
