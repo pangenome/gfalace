@@ -32,17 +32,26 @@ or
 gfalace -g file1.gfa file2.gfa.gz file3.gfa -o combined.gfa
 ```
 
-You can mix gzip-compressed (`.gfa.gz`) and uncompressed (`.gfa`) files in the input.
+of from a file list:
 
-The input GFA files can be provided in any order. This is because GFALace uses the coordinate information in the path names (CHROM:START-END) to determine the correct ordering and relationships between sequences.
+```bash
+gfalace -l gfa_list.txt -o combined.gfa
+```
+
+You can mix compressed (`.gfa.gz`, `.gfa.bgz`, `.gfa.zst`) and uncompressed (`.gfa`) files in the input.
+
+The input GFA files can be provided in any order. This is because GFALace uses the coordinate information in the path names (`CHROM:START-END`) to determine the correct ordering and relationships between sequences.
 
 ## Options
 
 - `-g, --gfa-list`: List of input GFA files (space-separated)
+- `-l, --gfa-list`: Text file containing GFA paths (one per line)
 - `-o, --output`: Output GFA file path
-- `--fill_gaps`: Gap filling mode (0 = none [default], 1 = middle gaps only, 2 = all gaps)
+- `--compress`: Output compression format: `none`, `gzip`, `bgzip`, `zstd`, or `auto` (default: auto-detect from extension)
+- `--fill_gaps`: Gap filling mode (0 = `none` [default], 1 = `middle` gaps only, 2 = `all` gaps)
 - `--fasta`: FASTA file containing sequences for gap filling
-- `-d, --debug`: Enable debug output
+- `--temp-dir`: Directory for temporary files
+- `-t, --num-threads`: Number of threads (default: 4)
 - `-h, --help`: Show help information
 - `-V, --version`: Show version information
 
@@ -65,14 +74,15 @@ Note: `NAME` can contain ':' characters. When parsing coordinates, GFALace uses 
 
 ## Features
 
-- Combines multiple GFA files (both .gfa and .gfa.gz) while preserving path information
+- Combines multiple GFA files while preserving path information
+- Parallel processing for improved performance
 - Translates node IDs to avoid conflicts
 - Creates edges between contiguous path segments
 - Handles both contiguous and non-contiguous ranges
 - Preserves original sequence and path relationships
 - Outputs a standard-compliant GFA 1.0 file
 
-## Post-Processing Recommendations
+## Post-processing recommendations
 
 After combining the GFA files, the resulting graph will already have compacted node IDs ranging from `1` to the total number of nodes. However, it is strongly recommended to perform post-processing steps using **[ODGI](https://github.com/pangenome/odgi)** to unchop and sort the graph.
 
