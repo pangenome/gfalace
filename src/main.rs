@@ -295,12 +295,21 @@ fn run_lace(args: LaceArgs) -> io::Result<()> {
 }
 
 // Unchop implementation
+#[derive(Debug, Clone)]
+struct PathStep {
+    path_name: String,
+    step_index: usize,
+    is_reverse: bool,
+}
+
 struct UnchopGraph {
     edges: FxHashMap<u64, Vec<(u64, bool, bool)>>, // node -> [(target, from_rev, to_rev)]
     sequence_file: File,
     sequence_offsets: Vec<(u64, u32)>, // (offset, length)
     paths_file: File,
     path_count: usize,
+    // New: Track which paths visit each node
+    node_to_paths: FxHashMap<u64, Vec<PathStep>>,
 }
 
 impl UnchopGraph {
@@ -323,6 +332,7 @@ impl UnchopGraph {
             sequence_offsets: Vec::new(),
             paths_file: paths_temp.into_file(),
             path_count: 0,
+            node_to_paths: FxHashMap::default(),
         })
     }
 
@@ -352,14 +362,93 @@ impl UnchopGraph {
 
     fn store_path(&mut self, path_name: &str, steps: &str) -> io::Result<()> {
         writeln!(&mut self.paths_file, "{}\t{}", path_name, steps)?;
+        
+        // Parse steps and record which nodes are visited
+        for (step_index, step) in steps.split(',').enumerate() {
+            if step.is_empty() {
+                continue;
+            }
+            
+            let (node_str, is_reverse) = if step.ends_with('+') {
+                (&step[..step.len()-1], false)
+            } else {
+                (&step[..step.len()-1], true)
+            };
+            
+            if let Ok(node_id) = node_str.parse::<u64>() {
+                self.node_to_paths.entry(node_id).or_default().push(PathStep {
+                    path_name: path_name.to_string(),
+                    step_index,
+                    is_reverse,
+                });
+            }
+        }
+        
         self.path_count += 1;
         Ok(())
+    }
+
+    fn nodes_are_perfect_path_neighbors(&self, left_id: u64, left_rev: bool, right_id: u64, right_rev: bool) -> bool {
+        // Get paths visiting left node
+        let left_paths = match self.node_to_paths.get(&left_id) {
+            Some(paths) => paths,
+            None => return false,
+        };
+        
+        // Get paths visiting right node
+        let right_paths = match self.node_to_paths.get(&right_id) {
+            Some(paths) => paths,
+            None => return false,
+        };
+        
+        // Create a map of right node's path visits for quick lookup
+        let mut right_path_map: FxHashMap<(&str, bool), Vec<usize>> = FxHashMap::default();
+        for step in right_paths {
+            let key = (step.path_name.as_str(), step.is_reverse);
+            right_path_map.entry(key).or_default().push(step.step_index);
+        }
+        
+        // Check that all paths through left node continue to right node
+        let mut expected_right_visits = 0;
+        
+        for left_step in left_paths {
+            // Determine if we need to look forward or backward based on orientations
+            let step_is_reverse = left_step.is_reverse != left_rev;
+            
+            // Calculate expected next step index
+            let expected_index = if step_is_reverse {
+                if left_step.step_index == 0 {
+                    return false; // Can't go backward from first step
+                }
+                left_step.step_index - 1
+            } else {
+                left_step.step_index + 1
+            };
+            
+            // Check if right node has this path at the expected position
+            let right_key = (left_step.path_name.as_str(), right_rev != step_is_reverse);
+            
+            match right_path_map.get(&right_key) {
+                Some(indices) => {
+                    if !indices.contains(&expected_index) {
+                        return false;
+                    }
+                    expected_right_visits += 1;
+                }
+                None => return false,
+            }
+        }
+        
+        // Check that right node doesn't have extra path visits
+        let observed_right_visits = right_paths.len();
+        
+        expected_right_visits == observed_right_visits
     }
 
     fn find_simple_components(&self) -> Vec<Vec<u64>> {
         let node_count = self.sequence_offsets.len();
         
-        // Build reverse edge index for efficient backward edge lookups
+        // Build reverse edge index
         let mut reverse_edges: FxHashMap<u64, Vec<(u64, bool, bool)>> = FxHashMap::default();
         for (&from_id, edges) in &self.edges {
             for &(to_id, from_rev, to_rev) in edges {
@@ -371,7 +460,6 @@ impl UnchopGraph {
         let mut parent: Vec<usize> = (0..node_count).collect();
         let mut rank = vec![0usize; node_count];
         
-        // Find with path compression
         fn find(parent: &mut [usize], mut x: usize) -> usize {
             let root = {
                 let mut r = x;
@@ -388,7 +476,6 @@ impl UnchopGraph {
             root
         }
         
-        // Union by rank
         fn union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
             let rx = find(parent, x);
             let ry = find(parent, y);
@@ -404,68 +491,68 @@ impl UnchopGraph {
             }
         }
         
-        // For each node, check if it forms a simple chain with neighbors
+        // Check each node for simple chain formation
         for node_id in 1..=node_count as u64 {
-            // Get forward edges (from this node)
-            let forward_edges: Vec<u64> = self.edges.get(&node_id)
-                .map(|edges| edges.iter()
+            // Check forward edges
+            if let Some(edges) = self.edges.get(&node_id) {
+                let forward_edges: Vec<_> = edges.iter()
                     .filter(|&&(to_id, from_rev, to_rev)| !from_rev && !to_rev && to_id != node_id)
-                    .map(|&(to_id, _, _)| to_id)
-                    .collect())
-                .unwrap_or_default();
-            
-            // Get backward edges (to this node)
-            let backward_edges: Vec<u64> = reverse_edges.get(&node_id)
-                .map(|edges| edges.iter()
-                    .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != node_id)
-                    .map(|&(from_id, _, _)| from_id)
-                    .collect())
-                .unwrap_or_default();
-            
-            // Check if this node has exactly one forward and one backward edge
-            if forward_edges.len() == 1 && backward_edges.len() == 1 {
-                let next_id = forward_edges[0];
-                let prev_id = backward_edges[0];
+                    .collect();
                 
-                // Check if the next node also has exactly one backward edge
-                let next_backward: Vec<u64> = reverse_edges.get(&next_id)
-                    .map(|edges| edges.iter()
-                        .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != next_id)
-                        .map(|&(from_id, _, _)| from_id)
-                        .collect())
-                    .unwrap_or_default();
-                
-                // Check if prev node has exactly one forward edge
-                let prev_forward: Vec<u64> = self.edges.get(&prev_id)
-                    .map(|edges| edges.iter()
-                        .filter(|&&(to_id, from_rev, to_rev)| !from_rev && !to_rev && to_id != prev_id)
-                        .map(|&(to_id, _, _)| to_id)
-                        .collect())
-                    .unwrap_or_default();
-                
-                // Union nodes that form proper chains
-                if next_backward.len() == 1 && next_backward[0] == node_id {
-                    union(&mut parent, &mut rank, (node_id - 1) as usize, (next_id - 1) as usize);
+                if forward_edges.len() == 1 {
+                    let (next_id, _, _) = forward_edges[0];
+                    
+                    // Check if next node has degree 1 backward
+                    if let Some(rev_edges) = reverse_edges.get(next_id) {
+                        let backward_count = rev_edges.iter()
+                            .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != *next_id)
+                            .count();
+                        
+                        if backward_count == 1 && self.nodes_are_perfect_path_neighbors(node_id, false, *next_id, false) {
+                            union(&mut parent, &mut rank, (node_id - 1) as usize, (*next_id - 1) as usize);
+                        }
+                    }
                 }
-                if prev_forward.len() == 1 && prev_forward[0] == node_id {
-                    union(&mut parent, &mut rank, (prev_id - 1) as usize, (node_id - 1) as usize);
+            }
+            
+            // Check backward edges
+            if let Some(edges) = reverse_edges.get(&node_id) {
+                let backward_edges: Vec<_> = edges.iter()
+                    .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != node_id)
+                    .collect();
+                
+                if backward_edges.len() == 1 {
+                    let (prev_id, _, _) = backward_edges[0];
+                    
+                    // Check if prev node has degree 1 forward
+                    if let Some(fwd_edges) = self.edges.get(prev_id) {
+                        let forward_count = fwd_edges.iter()
+                            .filter(|&&(to_id, from_rev, to_rev)| !from_rev && !to_rev && to_id != *prev_id)
+                            .count();
+                        
+                        if forward_count == 1 && self.nodes_are_perfect_path_neighbors(*prev_id, false, node_id, false) {
+                            union(&mut parent, &mut rank, (*prev_id - 1) as usize, (node_id - 1) as usize);
+                        }
+                    }
                 }
             }
         }
         
-        // Collect components
+        // Collect and order components
         let mut component_nodes: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
         for node_idx in 0..node_count {
             let root = find(&mut parent, node_idx);
             component_nodes.entry(root).or_default().push((node_idx + 1) as u64);
         }
         
-        // Order components and return
         let mut components = Vec::new();
-        for (_, nodes) in component_nodes {
+        for (_, mut nodes) in component_nodes {
             if nodes.len() > 1 {
-                // Find start node (no internal backward edges)
+                // Order nodes in the component
+                nodes.sort_unstable();
                 let node_set: FxHashSet<u64> = nodes.iter().copied().collect();
+                
+                // Find start node (no internal backward edges)
                 let start = nodes.iter()
                     .find(|&&node_id| {
                         reverse_edges.get(&node_id)
@@ -500,7 +587,6 @@ impl UnchopGraph {
                 }
             }
             
-            // Single node or couldn't order properly
             components.push(nodes);
         }
         
@@ -570,6 +656,7 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
 
     info!("Finding unchoppable components");
     let components = graph.find_simple_components();
+    info!("Found {} components", components.len());
     
     let nodes_to_unchop = components.iter()
         .filter(|c| c.len() > 1)
