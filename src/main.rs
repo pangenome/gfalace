@@ -308,7 +308,7 @@ struct UnchopGraph {
     sequence_offsets: Vec<(u64, u32)>, // (offset, length)
     paths_file: File,
     path_count: usize,
-    // New: Track which paths visit each node
+    // Track which paths visit each node with their step information
     node_to_paths: FxHashMap<u64, Vec<PathStep>>,
 }
 
@@ -363,7 +363,7 @@ impl UnchopGraph {
     fn store_path(&mut self, path_name: &str, steps: &str) -> io::Result<()> {
         writeln!(&mut self.paths_file, "{}\t{}", path_name, steps)?;
         
-        // Parse steps and record which nodes are visited
+        // Parse steps and record which nodes are visited by this path
         for (step_index, step) in steps.split(',').enumerate() {
             if step.is_empty() {
                 continue;
@@ -468,6 +468,7 @@ impl UnchopGraph {
                 }
                 r
             };
+            // Path compression
             while x != root {
                 let next = parent[x];
                 parent[x] = root;
@@ -514,28 +515,6 @@ impl UnchopGraph {
                     }
                 }
             }
-            
-            // Check backward edges
-            if let Some(edges) = reverse_edges.get(&node_id) {
-                let backward_edges: Vec<_> = edges.iter()
-                    .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != node_id)
-                    .collect();
-                
-                if backward_edges.len() == 1 {
-                    let (prev_id, _, _) = backward_edges[0];
-                    
-                    // Check if prev node has degree 1 forward
-                    if let Some(fwd_edges) = self.edges.get(prev_id) {
-                        let forward_count = fwd_edges.iter()
-                            .filter(|&&(to_id, from_rev, to_rev)| !from_rev && !to_rev && to_id != *prev_id)
-                            .count();
-                        
-                        if forward_count == 1 && self.nodes_are_perfect_path_neighbors(*prev_id, false, node_id, false) {
-                            union(&mut parent, &mut rank, (*prev_id - 1) as usize, (node_id - 1) as usize);
-                        }
-                    }
-                }
-            }
         }
         
         // Collect and order components
@@ -548,7 +527,7 @@ impl UnchopGraph {
         let mut components = Vec::new();
         for (_, mut nodes) in component_nodes {
             if nodes.len() > 1 {
-                // Order nodes in the component
+                // Order nodes in the component by following edges
                 nodes.sort_unstable();
                 let node_set: FxHashSet<u64> = nodes.iter().copied().collect();
                 
@@ -624,6 +603,7 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
     let mut graph = UnchopGraph::new(args.temp_dir.as_deref())?;
     let mut node_id_map = FxHashMap::default(); // original ID -> sequential ID
 
+    // First pass: read nodes and edges
     for line in reader.lines() {
         let line = line?;
         let fields: Vec<&str> = line.split('\t').collect();
@@ -648,7 +628,31 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
                     .push((to_id, from_orient, to_orient));
             }
             Some("P") if fields.len() >= 3 => {
-                graph.store_path(fields[1], fields[2])?;
+                // Store path with mapped node IDs
+                let path_name = fields[1];
+                let steps = fields[2];
+                
+                // Remap node IDs in steps
+                let mut mapped_steps = Vec::new();
+                for step in steps.split(',') {
+                    if step.is_empty() {
+                        continue;
+                    }
+                    
+                    let (node_str, orient) = if step.ends_with('+') {
+                        (&step[..step.len()-1], "+")
+                    } else {
+                        (&step[..step.len()-1], "-")
+                    };
+                    
+                    if let Ok(orig_id) = node_str.parse::<u64>() {
+                        if let Some(&new_id) = node_id_map.get(&orig_id) {
+                            mapped_steps.push(format!("{}{}", new_id, orient));
+                        }
+                    }
+                }
+                
+                graph.store_path(path_name, &mapped_steps.join(","))?;
             }
             _ => {}
         }
@@ -719,11 +723,14 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
             writeln!(writer, "S\t{}\t{}", new_id, String::from_utf8_lossy(&seq))?;
             id_mapping.insert(component[0], new_id);
         } else {
+            // Concatenate sequences
             let mut combined_seq = Vec::new();
             for &node_id in component {
                 combined_seq.extend(graph.get_sequence(node_id)?);
             }
             writeln!(writer, "S\t{}\t{}", new_id, String::from_utf8_lossy(&combined_seq))?;
+            
+            // Map all nodes in component to the new node
             for &node_id in component {
                 id_mapping.insert(node_id, new_id);
             }
@@ -731,16 +738,17 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
         new_id += 1;
     }
 
-    // Write edges
+    // Write edges - collect external edges from components
     let mut written_edges = FxHashSet::default();
     
     for component in &components {
+        let component_set: FxHashSet<u64> = component.iter().copied().collect();
         let mapped_id = id_mapping[&component[0]];
         
-        // External edges from first node
+        // Edges from first node
         if let Some(edges) = graph.edges.get(&component[0]) {
             for &(to_id, from_rev, to_rev) in edges {
-                if !component.contains(&to_id) {
+                if !component_set.contains(&to_id) {
                     let mapped_to = id_mapping[&to_id];
                     let edge_key = (mapped_id, from_rev, mapped_to, to_rev);
                     
@@ -756,12 +764,12 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
             }
         }
         
-        // External edges from last node (if different)
+        // Edges from last node (if multi-node component)
         if component.len() > 1 {
             let last_node = component[component.len() - 1];
             if let Some(edges) = graph.edges.get(&last_node) {
                 for &(to_id, from_rev, to_rev) in edges {
-                    if !component.contains(&to_id) {
+                    if !component_set.contains(&to_id) {
                         let mapped_to = id_mapping[&to_id];
                         let edge_key = (mapped_id, from_rev, mapped_to, to_rev);
                         
@@ -806,6 +814,7 @@ fn run_unchop(args: UnchopArgs) -> io::Result<()> {
             let node_id: u64 = node_str.parse().unwrap();
             let mapped_id = id_mapping[&node_id];
             
+            // Only add if different from last to avoid duplicates from merged nodes
             if Some(mapped_id) != last_mapped_id {
                 new_steps.push(format!("{}{}", mapped_id, orient));
                 last_mapped_id = Some(mapped_id);
