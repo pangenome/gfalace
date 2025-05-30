@@ -243,14 +243,14 @@ fn main() {
     // log_memory_usage("after_reading_files");
 
     // PASS 1: sort + dedup — purely local, so go parallel
-    info!("Sorting, deduplicating, trimming, and linking {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
+    info!("Sorting and deduplicating {} path ranges from {} path keys", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>(), path_key_ranges.len());
     path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
         sort_and_filter_ranges(ranges);
     });
 
     // PASS 2: Process different path keys in parallel with minimal locking
-    info!("Trimming overlaps and linking contiguous ranges for {} path keys", path_key_ranges.len());
-    
+    info!("Trimming overlaps and linking contiguous ranges for {} path ranges from {} path keys", path_key_ranges.len(), path_key_ranges.len());
+
     // Wrap graph in Arc<Mutex> for thread-safe access
     let graph_mutex = Arc::new(Mutex::new(combined_graph));
 
