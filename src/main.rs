@@ -3,7 +3,7 @@ use std::{
     io::{self, Read, Write, Seek, SeekFrom, BufWriter, BufReader, BufRead},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use handlegraph::{
     handle::{Handle, NodeId},
 };
@@ -20,7 +20,7 @@ use rayon::ThreadPoolBuilder;
 use std::num::NonZeroUsize;
 
 use gzp::{
-    deflate::{Gzip, Bgzf},  // Both Gzip and Bgzf are in deflate module
+    deflate::{Gzip, Bgzf}, // Both Gzip and Bgzf are in deflate module
     par::compress::{ParCompress, ParCompressBuilder},
 };
 use zstd::stream::Encoder as ZstdEncoder;
@@ -59,7 +59,22 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
-struct Args {
+struct Cli {
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Lace multiple GFA files into one
+    Lace(LaceArgs),
+    
+    /// Unchop a GFA file by merging unitigs
+    Unchop(UnchopArgs),
+}
+
+#[derive(Parser, Debug)]
+struct LaceArgs {
     /// List of GFA file paths to combine (can use wildcards)
     #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
     gfa_files: Option<Vec<String>>,
@@ -97,6 +112,33 @@ struct Args {
     verbose: u8,
 }
 
+#[derive(Parser, Debug)]
+struct UnchopArgs {
+    /// Input GFA file path (use - for stdin)
+    #[clap(short, long)]
+    input: String,
+
+    /// Output GFA file path (use - for stdout)
+    #[clap(short, long)]
+    output: String,
+
+    /// Output compression format: none, gzip (.gz), bgzip (.bgz), or zstd (.zst)
+    #[clap(long, default_value = "auto")]
+    compress: String,
+
+    /// Temporary directory for temporary files
+    #[clap(long)]
+    temp_dir: Option<String>,
+
+    /// Number of threads for parallel processing
+    #[clap(short = 't', long, default_value_t = NonZeroUsize::new(4).unwrap())]
+    num_threads: NonZeroUsize,
+
+    /// Verbosity level (0 = error, 1 = info, 2 = debug)
+    #[clap(short, long, default_value = "0")]
+    verbose: u8,
+}
+
 fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
     match compress_arg.to_lowercase().as_str() {
         "none" => Format::No,
@@ -123,16 +165,33 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
 }
 
 fn main() {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
+    match cli.command {
+        Commands::Lace(args) => {
+            if let Err(e) = run_lace(args) {
+                error!("Lacing failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Unchop(args) => {
+            if let Err(e) = run_unchop(args) {
+                error!("Unchopping failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn run_lace(args: LaceArgs) -> io::Result<()> {
     // Initialize logger based on verbosity
     env_logger::Builder::new()
-    .filter_level(match args.verbose {
-        0 => log::LevelFilter::Error,
-        1 => log::LevelFilter::Info,
-        _ => log::LevelFilter::Debug,
-    })
-    .init();
+        .filter_level(match args.verbose {
+            0 => log::LevelFilter::Error,
+            1 => log::LevelFilter::Info,
+            _ => log::LevelFilter::Debug,
+        })
+        .init();
     
     // Configure thread pool
     ThreadPoolBuilder::new()
@@ -158,43 +217,44 @@ fn main() {
                 }
                 Err(e) => {
                     error!("Failed to read GFA list file '{}': {}", list_file, e);
-                    std::process::exit(1);
+                    return Err(e);
                 }
             }
         }
         (None, None) => {
             error!("Either --gfa-files (-g) or --gfa-list (-l) must be specified");
-            std::process::exit(1);
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "No input files specified"));
         }
         (Some(_), Some(_)) => {
             error!("Cannot specify both --gfa-files and --gfa-list");
-            std::process::exit(1);
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Conflicting input options"));
         }
     };
+
     if gfa_files.is_empty() {
         error!("No GFA files specified");
-        std::process::exit(1);
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "No GFA files"));
     }
 
-    let fasta_reader = args.fasta.as_ref().map(|fasta_path| faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
+    let fasta_reader = args.fasta.as_ref().map(|fasta_path| {
+        faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
             error!("Failed to open FASTA file: {}", e);
             std::process::exit(1);
-        }));
+        })
+    });
 
-    // log_memory_usage("start");
+     // log_memory_usage("start");
 
     // Create a single combined graph without paths and a map of path key to ranges
     info!("Collecting metadata from {} GFA files", gfa_files.len());
-    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref())
-        .unwrap_or_else(|e| {
-            error!("Failed to read GFA files: {}", e);
-            std::process::exit(1);
-        });
+    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, args.temp_dir.as_deref())?;
 
     // log_memory_usage("after_reading_files");
 
     // PASS 1: sort + dedup — purely local, so go parallel
-    info!("Sorting, deduplicating, trimming, and linking {} path ranges", path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
+    info!("Sorting, deduplicating, trimming, and linking {} path ranges", 
+        path_key_ranges.values().map(|ranges| ranges.len()).sum::<usize>());
+    
     path_key_ranges.par_iter_mut().for_each(|(_path_key, ranges)| {
         sort_and_filter_ranges(ranges);
     });
@@ -221,15 +281,397 @@ fn main() {
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_reader, args.verbose > 1) {
-        Ok(_) => info!("Successfully wrote the combined graph to {} ({:?} format)", args.output, compression_format),
-        Err(e) => error!("Error writing the GFA file: {}", e),
+    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, 
+                           compression_format, args.fill_gaps, &fasta_reader, args.verbose > 1) {
+        Ok(_) => {
+            info!("Successfully wrote the combined graph to {} ({:?} format)", args.output, compression_format);
+            Ok(())
+        }
+        Err(e) => {
+            error!("Error writing the GFA file: {}", e);
+            Err(e)
+        }
     }
-
-    // log_memory_usage("end");
 }
 
-// Compact edge representation using bit-packed orientations
+// Unchop implementation
+struct UnchopGraph {
+    edges: FxHashMap<u64, Vec<(u64, bool, bool)>>, // node -> [(target, from_rev, to_rev)]
+    sequence_file: File,
+    sequence_offsets: Vec<(u64, u32)>, // (offset, length)
+    paths_file: File,
+    path_count: usize,
+}
+
+impl UnchopGraph {
+    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+        let seq_temp = if let Some(dir) = temp_dir {
+            NamedTempFile::new_in(dir)?
+        } else {
+            NamedTempFile::new()?
+        };
+        
+        let paths_temp = if let Some(dir) = temp_dir {
+            NamedTempFile::new_in(dir)?
+        } else {
+            NamedTempFile::new()?
+        };
+
+        Ok(UnchopGraph {
+            edges: FxHashMap::default(),
+            sequence_file: seq_temp.into_file(),
+            sequence_offsets: Vec::new(),
+            paths_file: paths_temp.into_file(),
+            path_count: 0,
+        })
+    }
+
+    fn add_sequence(&mut self, seq: &[u8]) -> io::Result<u64> {
+        let offset = self.sequence_file.seek(SeekFrom::End(0))?;
+        self.sequence_file.write_all(seq)?;
+        
+        let idx = self.sequence_offsets.len() as u64 + 1; // 1-based IDs
+        self.sequence_offsets.push((offset, seq.len() as u32));
+        Ok(idx)
+    }
+
+    fn get_sequence(&mut self, node_id: u64) -> io::Result<Vec<u8>> {
+        let idx = (node_id - 1) as usize;
+        if idx >= self.sequence_offsets.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid node ID"));
+        }
+        
+        let (offset, length) = self.sequence_offsets[idx];
+        let mut buffer = vec![0u8; length as usize];
+        
+        self.sequence_file.seek(SeekFrom::Start(offset))?;
+        self.sequence_file.read_exact(&mut buffer)?;
+        
+        Ok(buffer)
+    }
+
+    fn store_path(&mut self, path_name: &str, steps: &str) -> io::Result<()> {
+        writeln!(&mut self.paths_file, "{}\t{}", path_name, steps)?;
+        self.path_count += 1;
+        Ok(())
+    }
+
+    fn find_simple_components(&self) -> Vec<Vec<u64>> {
+        let mut components = Vec::new();
+        let mut visited = FxHashSet::default();
+        
+        // Build reverse edge index and degree counts in one pass - O(E)
+        let mut predecessors: FxHashMap<u64, Vec<(u64, bool, bool)>> = FxHashMap::default();
+        let mut in_degree: FxHashMap<u64, usize> = FxHashMap::default();
+        let mut out_degree: FxHashMap<u64, usize> = FxHashMap::default();
+        
+        for (&from_id, edges) in &self.edges {
+            *out_degree.entry(from_id).or_insert(0) = edges.len();
+            for &(to_id, from_rev, to_rev) in edges {
+                *in_degree.entry(to_id).or_insert(0) += 1;
+                predecessors.entry(to_id).or_default().push((from_id, from_rev, to_rev));
+            }
+        }
+        
+        // Find chains - now O(N) instead of O(N*E)
+        for node_id in 1..=self.sequence_offsets.len() as u64 {
+            if visited.contains(&node_id) {
+                continue;
+            }
+            
+            let in_deg = in_degree.get(&node_id).copied().unwrap_or(0);
+            let out_deg = out_degree.get(&node_id).copied().unwrap_or(0);
+            
+            // Not part of a simple chain
+            if !(in_deg <= 1 && out_deg <= 1) {
+                visited.insert(node_id);
+                components.push(vec![node_id]);
+                continue;
+            }
+            
+            // Find start of chain efficiently using predecessor index
+            let mut chain_start = node_id;
+            let mut current = node_id;
+            
+            // Go backward to find chain start - now O(chain_length) instead of O(E*chain_length)
+            while let Some(preds) = predecessors.get(&current) {
+                if preds.len() == 1 {
+                    let pred_id = preds[0].0;
+                    if out_degree.get(&pred_id).copied().unwrap_or(0) == 1 &&
+                    in_degree.get(&pred_id).copied().unwrap_or(0) <= 1 &&
+                    !visited.contains(&pred_id) {
+                        chain_start = pred_id;
+                        current = pred_id;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            
+            // Build chain forward
+            let mut component = vec![chain_start];
+            visited.insert(chain_start);
+            
+            let mut current = chain_start;
+            while let Some(edges) = self.edges.get(&current) {
+                if edges.len() == 1 {
+                    let next = edges[0].0;
+                    if !visited.contains(&next) && 
+                    in_degree.get(&next).copied().unwrap_or(0) == 1 &&
+                    out_degree.get(&next).copied().unwrap_or(0) <= 1 {
+                        component.push(next);
+                        visited.insert(next);
+                        current = next;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            
+            components.push(component);
+        }
+        
+        // Add any unvisited nodes as single-node components
+        for node_id in 1..=self.sequence_offsets.len() as u64 {
+            if !visited.contains(&node_id) {
+                components.push(vec![node_id]);
+            }
+        }
+        
+        components
+    }
+}
+
+fn run_unchop(args: UnchopArgs) -> io::Result<()> {
+    env_logger::Builder::new()
+        .filter_level(match args.verbose {
+            0 => log::LevelFilter::Error,
+            1 => log::LevelFilter::Info,
+            _ => log::LevelFilter::Debug,
+        })
+        .init();
+
+    ThreadPoolBuilder::new()
+        .num_threads(args.num_threads.into())
+        .build_global()
+        .unwrap();
+
+    let compression_format = get_compression_format(&args.compress, &args.output);
+
+    info!("Reading GFA file");
+    
+    let reader: Box<dyn BufRead> = if args.input == "-" {
+        Box::new(BufReader::new(io::stdin()))
+    } else {
+        let file = File::open(&args.input)?;
+        let (reader, _format) = niffler::get_reader(Box::new(file))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Box::new(BufReader::new(reader))
+    };
+
+    let mut graph = UnchopGraph::new(args.temp_dir.as_deref())?;
+    let mut node_id_map = FxHashMap::default(); // original ID -> sequential ID
+
+    for line in reader.lines() {
+        let line = line?;
+        let fields: Vec<&str> = line.split('\t').collect();
+        
+        match fields.get(0).map(|s| s.as_ref()) {
+            Some("S") if fields.len() >= 3 => {
+                let orig_id: u64 = fields[1].parse().unwrap();
+                let seq = fields[2].as_bytes();
+                let new_id = graph.add_sequence(seq)?;
+                node_id_map.insert(orig_id, new_id);
+            }
+            Some("L") if fields.len() >= 6 => {
+                let from: u64 = fields[1].parse().unwrap();
+                let from_orient = fields[2] == "-";
+                let to: u64 = fields[3].parse().unwrap();
+                let to_orient = fields[4] == "-";
+                
+                let from_id = node_id_map[&from];
+                let to_id = node_id_map[&to];
+                
+                graph.edges.entry(from_id).or_default()
+                    .push((to_id, from_orient, to_orient));
+            }
+            Some("P") if fields.len() >= 3 => {
+                graph.store_path(fields[1], fields[2])?;
+            }
+            _ => {}
+        }
+    }
+
+    info!("Finding unchoppable components");
+    let components = graph.find_simple_components();
+    
+    let nodes_to_unchop = components.iter()
+        .filter(|c| c.len() > 1)
+        .map(|c| c.len())
+        .sum::<usize>();
+    let new_nodes = components.iter().filter(|c| c.len() > 1).count();
+    
+    info!("Unchopping {} nodes into {} new nodes", nodes_to_unchop, new_nodes);
+
+    // Create output
+    let output: Box<dyn Write> = if args.output == "-" {
+        Box::new(io::stdout())
+    } else {
+        let output_file = File::create(&args.output)?;
+        match compression_format {
+            Format::Gzip => {
+                let parz: ParCompress<Gzip> = ParCompressBuilder::new()
+                    .num_threads(rayon::current_num_threads())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to set threads: {:?}", e)))?
+                    .compression_level(flate2::Compression::new(6))
+                    .from_writer(output_file);
+                Box::new(parz)
+            },
+            Format::Bzip => {
+                let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
+                    .num_threads(rayon::current_num_threads())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to set threads: {:?}", e)))?
+                    .compression_level(flate2::Compression::new(6))
+                    .from_writer(output_file);
+                Box::new(parz)
+            },
+            Format::Zstd => {
+                let mut encoder = ZstdEncoder::new(output_file, 6)?;
+                encoder.multithread(rayon::current_num_threads() as u32)?;
+                Box::new(encoder)
+            },
+            Format::No => {
+                Box::new(output_file)
+            },
+            _ => {
+                niffler::get_writer(
+                    Box::new(output_file),
+                    compression_format,
+                    niffler::compression::Level::Six,
+                ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            }
+        }
+    };
+
+    let mut writer = BufWriter::new(output);
+    writeln!(writer, "H\tVN:Z:1.0")?;
+
+    // Write unchopped nodes
+    let mut id_mapping = FxHashMap::default();
+    let mut new_id = 1u64;
+
+    for component in &components {
+        if component.len() == 1 {
+            let seq = graph.get_sequence(component[0])?;
+            writeln!(writer, "S\t{}\t{}", new_id, String::from_utf8_lossy(&seq))?;
+            id_mapping.insert(component[0], new_id);
+        } else {
+            let mut combined_seq = Vec::new();
+            for &node_id in component {
+                combined_seq.extend(graph.get_sequence(node_id)?);
+            }
+            writeln!(writer, "S\t{}\t{}", new_id, String::from_utf8_lossy(&combined_seq))?;
+            for &node_id in component {
+                id_mapping.insert(node_id, new_id);
+            }
+        }
+        new_id += 1;
+    }
+
+    // Write edges
+    let mut written_edges = FxHashSet::default();
+    
+    for component in &components {
+        let mapped_id = id_mapping[&component[0]];
+        
+        // External edges from first node
+        if let Some(edges) = graph.edges.get(&component[0]) {
+            for &(to_id, from_rev, to_rev) in edges {
+                if !component.contains(&to_id) {
+                    let mapped_to = id_mapping[&to_id];
+                    let edge_key = (mapped_id, from_rev, mapped_to, to_rev);
+                    
+                    if written_edges.insert(edge_key) {
+                        writeln!(writer, "L\t{}\t{}\t{}\t{}\t0M",
+                            mapped_id,
+                            if from_rev { "-" } else { "+" },
+                            mapped_to,
+                            if to_rev { "-" } else { "+" }
+                        )?;
+                    }
+                }
+            }
+        }
+        
+        // External edges from last node (if different)
+        if component.len() > 1 {
+            let last_node = component[component.len() - 1];
+            if let Some(edges) = graph.edges.get(&last_node) {
+                for &(to_id, from_rev, to_rev) in edges {
+                    if !component.contains(&to_id) {
+                        let mapped_to = id_mapping[&to_id];
+                        let edge_key = (mapped_id, from_rev, mapped_to, to_rev);
+                        
+                        if written_edges.insert(edge_key) {
+                            writeln!(writer, "L\t{}\t{}\t{}\t{}\t0M",
+                                mapped_id,
+                                if from_rev { "-" } else { "+" },
+                                mapped_to,
+                                if to_rev { "-" } else { "+" }
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Update and write paths
+    graph.paths_file.seek(SeekFrom::Start(0))?;
+    let path_reader = BufReader::new(&graph.paths_file);
+    
+    for line in path_reader.lines() {
+        let line = line?;
+        let mut parts = line.split('\t');
+        let path_name = parts.next().unwrap();
+        let steps_str = parts.next().unwrap();
+        
+        let mut new_steps = Vec::new();
+        let mut last_mapped_id = None;
+        
+        for step in steps_str.split(',') {
+            if step.is_empty() {
+                continue;
+            }
+            
+            let (node_str, orient) = if step.ends_with('+') {
+                (&step[..step.len()-1], '+')
+            } else {
+                (&step[..step.len()-1], '-')
+            };
+            
+            let node_id: u64 = node_str.parse().unwrap();
+            let mapped_id = id_mapping[&node_id];
+            
+            if Some(mapped_id) != last_mapped_id {
+                new_steps.push(format!("{}{}", mapped_id, orient));
+                last_mapped_id = Some(mapped_id);
+            }
+        }
+        
+        writeln!(writer, "P\t{}\t{}\t*", path_name, new_steps.join(","))?;
+    }
+
+    writer.flush()?;
+    info!("Successfully wrote unchopped graph to {}", args.output);
+    
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CompactEdge {
     // Use top 2 bits for orientations, rest for node IDs
@@ -570,10 +1012,8 @@ fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
     None
 }
 
-fn sort_and_filter_ranges(
-    ranges: &mut Vec<RangeInfo>,
-) {
-    // Sort ranges by start position
+fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
+     // Sort ranges by start position
     ranges.sort_by_key(|r| (r.start, r.end));
 
     debug!("  Removing redundant ranges");
