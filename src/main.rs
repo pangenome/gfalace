@@ -80,9 +80,13 @@ struct Args {
     #[clap(long, default_value = "0")]
     fill_gaps: u8,
 
-    /// FASTA file containing sequences for gap filling
-    #[clap(long)]
-    fasta: Option<String>,
+    /// List of FASTA file paths for gap filling
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+    fasta_files: Option<Vec<String>>,
+
+    /// Text file containing list of FASTA file paths (one per line)
+    #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
+    fasta_list: Option<String>,
 
     /// Temporary directory for temporary files (default: same as input files)
     #[clap(long, value_parser)]
@@ -176,10 +180,55 @@ fn main() {
         std::process::exit(1);
     }
 
-    let fasta_reader = args.fasta.as_ref().map(|fasta_path| faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
-            error!("Failed to open FASTA file: {}", e);
-            std::process::exit(1);
-        }));
+    // Build FASTA index if FASTA files are provided
+    let fasta_index = if args.fill_gaps > 0 {
+        // Get list of FASTA files
+        let fasta_files = match (args.fasta_files, args.fasta_list) {
+            // Handle --fasta-files option
+            (Some(files), None) => files,
+            // Handle --fasta-list option
+            (None, Some(list_file)) => {
+                match std::fs::read_to_string(&list_file) {
+                    Ok(content) => {
+                        content
+                            .lines()
+                            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                            .map(|line| line.trim().to_string())
+                            .collect()
+                    }
+                    Err(e) => {
+                        error!("Failed to read FASTA list file '{}': {}", list_file, e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            _ => {
+                if args.fill_gaps == 2 {
+                    warn!("Gap filling mode 2 requires FASTA files; end gaps will not be filled");
+                }
+                vec![]
+            }
+        };
+
+        if fasta_files.is_empty() {
+            None
+        } else {
+            match FastaIndex::build_from_files(&fasta_files) {
+                Ok(index) => {
+                    info!("Built FASTA index for {} files with {} sequences", 
+                        index.fasta_paths.len(), 
+                        index.path_key_to_fasta.len());
+                    Some(index)
+                }
+                Err(e) => {
+                    error!("Failed to build FASTA index: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     // log_memory_usage("start");
 
@@ -221,7 +270,7 @@ fn main() {
 
     // log_memory_usage("before_writing");
 
-    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_reader, args.verbose > 1) {
+    match write_graph_to_gfa(&mut combined_graph, &path_key_ranges, &args.output, compression_format, args.fill_gaps, &fasta_index, args.verbose > 1) {
         Ok(_) => info!("Successfully wrote the combined graph to {} ({:?} format)", args.output, compression_format),
         Err(e) => error!("Error writing the GFA file: {}", e),
     }
@@ -362,6 +411,68 @@ impl RangeInfo {
     #[inline]
     fn overlaps_with(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
+    }
+}
+
+// Structure to manage multiple FASTA files
+struct FastaIndex {
+    fasta_paths: Vec<String>,
+    path_key_to_fasta: FxHashMap<String, usize>,
+}
+
+impl FastaIndex {
+    fn new() -> Self {
+        FastaIndex {
+            fasta_paths: Vec::new(),
+            path_key_to_fasta: FxHashMap::default(),
+        }
+    }
+
+    fn build_from_files(fasta_files: &[String]) -> io::Result<Self> {
+        let mut index = FastaIndex::new();
+        
+        for (fasta_idx, fasta_path) in fasta_files.iter().enumerate() {
+            index.fasta_paths.push(fasta_path.clone());
+            
+            // Read the .fai file to get sequence names
+            let fai_path = format!("{}.fai", fasta_path);
+            
+            // Try to open the .fai file, if it doesn't exist, try to create it
+            let fai_content = match std::fs::read_to_string(&fai_path) {
+                Ok(content) => content,
+                Err(_) => {
+                    // Try to create the index using rust-htslib
+                    match faidx::Reader::from_path(fasta_path) {
+                        Ok(_) => {
+                            // Index was created, now read it
+                            std::fs::read_to_string(&fai_path)?
+                        }
+                        Err(e) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("Failed to create FASTA index for '{}': {}", fasta_path, e)
+                            ));
+                        }
+                    }
+                }
+            };
+            
+            // Parse the .fai file to get sequence names
+            for line in fai_content.lines() {
+                if let Some(seq_name) = line.split('\t').next() {
+                    if !seq_name.is_empty() {
+                        index.path_key_to_fasta.insert(seq_name.to_string(), fasta_idx);
+                    }
+                }
+            }
+        }
+        
+        Ok(index)
+    }
+
+    fn get_fasta_path(&self, path_key: &str) -> Option<&str> {
+        self.path_key_to_fasta.get(path_key)
+            .map(|&idx| self.fasta_paths[idx].as_str())
     }
 }
 
@@ -906,7 +1017,7 @@ fn write_graph_to_gfa(
     output_path: &str,
     compression_format: Format,
     fill_gaps: u8,
-    fasta_reader: &Option<faidx::Reader>,
+    fasta_index: &Option<FastaIndex>,
     debug: bool
 ) -> std::io::Result<()> {
     info!("Marking unused nodes");
@@ -1002,9 +1113,9 @@ fn write_graph_to_gfa(
     let mut middle_gaps = 0;
     let mut end_gaps = 0;
 
-    // Check if a valid FASTA reader is provided for end gap filling
-    if fill_gaps == 2 && fasta_reader.is_none() {
-        warn!("Cannot fill end gaps without FASTA file; trailing gaps will be skipped");
+    // Check if a valid FASTA index is provided for end gap filling
+    if fill_gaps == 2 && fasta_index.is_none() {
+        warn!("Cannot fill end gaps without FASTA files; trailing gaps will be skipped");
     }
 
     for path_key in path_key_vec {
@@ -1058,7 +1169,7 @@ fn write_graph_to_gfa(
                 &mut file,
                 (0, ranges[0].start),
                 path_key,
-                fasta_reader,
+                fasta_index,
                 None, // No previous element for initial gap
                 ranges[0].steps.first(),
                 &id_mapping,
@@ -1094,7 +1205,7 @@ fn write_graph_to_gfa(
                         &mut file,
                         (last_range_end, next_start),
                         path_key,
-                        fasta_reader,
+                        fasta_index,
                         path_elements.last(),
                         ranges[i].steps.first(),
                         &id_mapping,
@@ -1113,38 +1224,46 @@ fn write_graph_to_gfa(
         }
 
         // Handle final gap if it exists and gap filling is enabled
-        if fill_gaps == 2 {
-            // Get sequence length if FASTA is provided
-            if let Some(total_len) = fasta_reader.as_ref()
-                .map(|r| r.fetch_seq_len(path_key) as usize)
-            {
-                if path_end < total_len {
-                    end_gaps += 1;
+        if fill_gaps == 2 && fasta_index.is_some() {
+            // Try to get the FASTA file for this path_key and its total length
+            if let Some(fasta_path) = fasta_index.as_ref().unwrap().get_fasta_path(path_key) {
+                match faidx::Reader::from_path(fasta_path) {
+                    Ok(reader) => {
+                        let total_len = reader.fetch_seq_len(path_key) as usize;
+                        if path_end < total_len {
+                            end_gaps += 1;
 
-                    path_elements.push(create_gap_node(
-                        &mut file,
-                        (path_end, total_len),
-                        path_key,
-                        fasta_reader,
-                        path_elements.last(),
-                        None,  // No next node for final gap
-                        &id_mapping,
-                        &mut new_id,
-                    )?);
-                    path_end = total_len;
-                } else if path_end > total_len {
-                    warn!("Path '{}' extends beyond sequence length ({} > {})",
-                        path_key, path_end, total_len);
+                            path_elements.push(create_gap_node(
+                                &mut file,
+                                (path_end, total_len),
+                                path_key,
+                                fasta_index,
+                                path_elements.last(),
+                                None,  // No next node for final gap
+                                &id_mapping,
+                                &mut new_id,
+                            )?);
+                            path_end = total_len;
+                        } else if path_end > total_len {
+                            warn!("Path '{}' extends beyond sequence length ({} > {})",
+                                path_key, path_end, total_len);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to open FASTA file '{}' for path '{}': {}", 
+                            fasta_path, path_key, e);
+                    }
                 }
             }
         }
 
         // Write the remaining path
         if !path_elements.is_empty() {
-            let is_full_path = path_start == 0 &&
-                fasta_reader.as_ref()
-                    .map(|r| r.fetch_seq_len(path_key) as usize == path_end)
-                    .unwrap_or(false);
+            let is_full_path = path_start == 0 && fasta_index.as_ref()
+                .and_then(|idx| idx.get_fasta_path(path_key))
+                .and_then(|fasta_path| faidx::Reader::from_path(fasta_path).ok())
+                .map(|reader| reader.fetch_seq_len(path_key) as usize == path_end)
+                .unwrap_or(false);
 
             let path_name = if is_full_path {
                 path_key.to_string()
@@ -1173,7 +1292,7 @@ fn create_gap_node<W: Write>(
     file: &mut BufWriter<W>,
     gap_range: (usize, usize),
     path_key: &str,
-    fasta_reader: &Option<faidx::Reader>,
+    fasta_index: &Option<FastaIndex>,
     last_element: Option<&String>,
     next_handle: Option<&Handle>,
     id_mapping: &[usize],
@@ -1183,13 +1302,25 @@ fn create_gap_node<W: Write>(
     let gap_size = gap_end - gap_start;
     
     // Get gap sequence either from FASTA or create string of N's
-    let gap_sequence = if let Some(reader) = fasta_reader {
-        match reader.fetch_seq_string(path_key, gap_start, gap_end - 1) {
-            Ok(seq) => seq,
-            Err(e) => {
-                error!("Failed to fetch sequence: {}", e);
-                "N".repeat(gap_size)
+    let gap_sequence = if let Some(index) = fasta_index {
+        if let Some(fasta_path) = index.get_fasta_path(path_key) {
+            match faidx::Reader::from_path(fasta_path) {
+                Ok(reader) => {
+                    match reader.fetch_seq_string(path_key, gap_start, gap_end - 1) {
+                        Ok(seq) => seq,
+                        Err(e) => {
+                            error!("Failed to fetch sequence from '{}': {}", fasta_path, e);
+                            "N".repeat(gap_size)
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to open FASTA file '{}': {}", fasta_path, e);
+                    "N".repeat(gap_size)
+                }
             }
+        } else {
+            "N".repeat(gap_size)
         }
     } else {
         "N".repeat(gap_size)
