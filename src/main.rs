@@ -357,89 +357,151 @@ impl UnchopGraph {
     }
 
     fn find_simple_components(&self) -> Vec<Vec<u64>> {
-        let mut components = Vec::new();
-        let mut visited = FxHashSet::default();
+        let node_count = self.sequence_offsets.len();
         
-        // Build reverse edge index and degree counts in one pass - O(E)
-        let mut predecessors: FxHashMap<u64, Vec<(u64, bool, bool)>> = FxHashMap::default();
-        let mut in_degree: FxHashMap<u64, usize> = FxHashMap::default();
-        let mut out_degree: FxHashMap<u64, usize> = FxHashMap::default();
-        
+        // Build reverse edge index for efficient backward edge lookups
+        let mut reverse_edges: FxHashMap<u64, Vec<(u64, bool, bool)>> = FxHashMap::default();
         for (&from_id, edges) in &self.edges {
-            *out_degree.entry(from_id).or_insert(0) = edges.len();
             for &(to_id, from_rev, to_rev) in edges {
-                *in_degree.entry(to_id).or_insert(0) += 1;
-                predecessors.entry(to_id).or_default().push((from_id, from_rev, to_rev));
+                reverse_edges.entry(to_id).or_default().push((from_id, from_rev, to_rev));
             }
         }
         
-        // Find chains - now O(N) instead of O(N*E)
-        for node_id in 1..=self.sequence_offsets.len() as u64 {
-            if visited.contains(&node_id) {
-                continue;
-            }
-            
-            let in_deg = in_degree.get(&node_id).copied().unwrap_or(0);
-            let out_deg = out_degree.get(&node_id).copied().unwrap_or(0);
-            
-            // Not part of a simple chain
-            if !(in_deg <= 1 && out_deg <= 1) {
-                visited.insert(node_id);
-                components.push(vec![node_id]);
-                continue;
-            }
-            
-            // Find start of chain efficiently using predecessor index
-            let mut chain_start = node_id;
-            let mut current = node_id;
-            
-            // Go backward to find chain start - now O(chain_length) instead of O(E*chain_length)
-            while let Some(preds) = predecessors.get(&current) {
-                if preds.len() == 1 {
-                    let pred_id = preds[0].0;
-                    if out_degree.get(&pred_id).copied().unwrap_or(0) == 1 &&
-                    in_degree.get(&pred_id).copied().unwrap_or(0) <= 1 &&
-                    !visited.contains(&pred_id) {
-                        chain_start = pred_id;
-                        current = pred_id;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
+        // Union-Find data structure
+        let mut parent: Vec<usize> = (0..node_count).collect();
+        let mut rank = vec![0usize; node_count];
+        
+        // Find with path compression
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            let root = {
+                let mut r = x;
+                while parent[r] != r {
+                    r = parent[r];
                 }
+                r
+            };
+            while x != root {
+                let next = parent[x];
+                parent[x] = root;
+                x = next;
             }
-            
-            // Build chain forward
-            let mut component = vec![chain_start];
-            visited.insert(chain_start);
-            
-            let mut current = chain_start;
-            while let Some(edges) = self.edges.get(&current) {
-                if edges.len() == 1 {
-                    let next = edges[0].0;
-                    if !visited.contains(&next) && 
-                    in_degree.get(&next).copied().unwrap_or(0) == 1 &&
-                    out_degree.get(&next).copied().unwrap_or(0) <= 1 {
-                        component.push(next);
-                        visited.insert(next);
-                        current = next;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            
-            components.push(component);
+            root
         }
         
-        // Add any unvisited nodes as single-node components
-        for node_id in 1..=self.sequence_offsets.len() as u64 {
-            if !visited.contains(&node_id) {
-                components.push(vec![node_id]);
+        // Union by rank
+        fn union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
+            let rx = find(parent, x);
+            let ry = find(parent, y);
+            if rx != ry {
+                if rank[rx] < rank[ry] {
+                    parent[rx] = ry;
+                } else if rank[rx] > rank[ry] {
+                    parent[ry] = rx;
+                } else {
+                    parent[ry] = rx;
+                    rank[rx] += 1;
+                }
             }
+        }
+        
+        // For each node, check if it forms a simple chain with neighbors
+        for node_id in 1..=node_count as u64 {
+            // Get forward edges (from this node)
+            let forward_edges: Vec<u64> = self.edges.get(&node_id)
+                .map(|edges| edges.iter()
+                    .filter(|&&(to_id, from_rev, to_rev)| !from_rev && !to_rev && to_id != node_id)
+                    .map(|&(to_id, _, _)| to_id)
+                    .collect())
+                .unwrap_or_default();
+            
+            // Get backward edges (to this node)
+            let backward_edges: Vec<u64> = reverse_edges.get(&node_id)
+                .map(|edges| edges.iter()
+                    .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != node_id)
+                    .map(|&(from_id, _, _)| from_id)
+                    .collect())
+                .unwrap_or_default();
+            
+            // Check if this node has exactly one forward and one backward edge
+            if forward_edges.len() == 1 && backward_edges.len() == 1 {
+                let next_id = forward_edges[0];
+                let prev_id = backward_edges[0];
+                
+                // Check if the next node also has exactly one backward edge
+                let next_backward: Vec<u64> = reverse_edges.get(&next_id)
+                    .map(|edges| edges.iter()
+                        .filter(|&&(from_id, from_rev, to_rev)| !from_rev && !to_rev && from_id != next_id)
+                        .map(|&(from_id, _, _)| from_id)
+                        .collect())
+                    .unwrap_or_default();
+                
+                // Check if prev node has exactly one forward edge
+                let prev_forward: Vec<u64> = self.edges.get(&prev_id)
+                    .map(|edges| edges.iter()
+                        .filter(|&&(to_id, from_rev, to_rev)| !from_rev && !to_rev && to_id != prev_id)
+                        .map(|&(to_id, _, _)| to_id)
+                        .collect())
+                    .unwrap_or_default();
+                
+                // Union nodes that form proper chains
+                if next_backward.len() == 1 && next_backward[0] == node_id {
+                    union(&mut parent, &mut rank, (node_id - 1) as usize, (next_id - 1) as usize);
+                }
+                if prev_forward.len() == 1 && prev_forward[0] == node_id {
+                    union(&mut parent, &mut rank, (prev_id - 1) as usize, (node_id - 1) as usize);
+                }
+            }
+        }
+        
+        // Collect components
+        let mut component_nodes: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
+        for node_idx in 0..node_count {
+            let root = find(&mut parent, node_idx);
+            component_nodes.entry(root).or_default().push((node_idx + 1) as u64);
+        }
+        
+        // Order components and return
+        let mut components = Vec::new();
+        for (_, nodes) in component_nodes {
+            if nodes.len() > 1 {
+                // Find start node (no internal backward edges)
+                let node_set: FxHashSet<u64> = nodes.iter().copied().collect();
+                let start = nodes.iter()
+                    .find(|&&node_id| {
+                        reverse_edges.get(&node_id)
+                            .map(|edges| !edges.iter()
+                                .any(|&(from_id, from_rev, to_rev)| 
+                                    !from_rev && !to_rev && node_set.contains(&from_id)))
+                            .unwrap_or(true)
+                    })
+                    .copied();
+                
+                if let Some(start_id) = start {
+                    // Order nodes by following edges
+                    let mut ordered = vec![start_id];
+                    let mut current = start_id;
+                    
+                    while ordered.len() < nodes.len() {
+                        if let Some(edges) = self.edges.get(&current) {
+                            for &(to_id, from_rev, to_rev) in edges {
+                                if !from_rev && !to_rev && node_set.contains(&to_id) && !ordered.contains(&to_id) {
+                                    ordered.push(to_id);
+                                    current = to_id;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if ordered.len() == nodes.len() {
+                        components.push(ordered);
+                        continue;
+                    }
+                }
+            }
+            
+            // Single node or couldn't order properly
+            components.push(nodes);
         }
         
         components
