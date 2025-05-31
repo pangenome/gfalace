@@ -621,6 +621,7 @@ fn read_gfa_files(
             );
         } else {
             error!("Failed to open GFA file '{}'", gfa_path);
+            std::process::exit(1);
         }
     });
 
@@ -1315,7 +1316,7 @@ fn create_gap_node<W: Write>(
                     }
                 }
                 Err(e) => {
-                    error!("Failed to open FASTA file '{}': {}", fasta_path, e);
+                    warn!("Failed to open FASTA file '{}': {}", fasta_path, e);
                     "N".repeat(gap_size)
                 }
             }
