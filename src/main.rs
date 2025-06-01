@@ -1360,8 +1360,18 @@ fn create_gap_node<W: Write>(
         if let Some(fasta_path) = index.get_fasta_path(path_key) {
             match faidx::Reader::from_path(fasta_path) {
                 Ok(reader) => {
-                    match reader.fetch_seq_string(path_key, gap_start, gap_end - 1) {
-                        Ok(seq) => seq,
+                    // Apply the fix for the rust_htslib memory leak bug
+                    // https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171
+                    match reader.fetch_seq(path_key, gap_start, gap_end - 1) {
+                        Ok(seq) => {
+                            let seq_vec = seq.to_vec();
+                            // Free the memory allocated by htslib to prevent memory leak
+                            unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
+                            String::from_utf8(seq_vec).unwrap_or_else(|e| {
+                                error!("Failed to convert sequence to UTF-8: {}", e);
+                                "N".repeat(gap_size)
+                            })
+                        }
                         Err(e) => {
                             error!("Failed to fetch sequence from '{}': {}", fasta_path, e);
                             "N".repeat(gap_size)
