@@ -1317,7 +1317,7 @@ fn write_graph_to_gfa(
                 .and_then(|idx| idx.get_fasta_path(path_key))
                 .and_then(|fasta_path| faidx::Reader::from_path(fasta_path).ok())
                 .map(|reader| reader.fetch_seq_len(path_key) as usize == path_end)
-                .unwrap_or(false);
+                .unwrap_or(true); // Assume path_end matches full length if no FASTA index is available
 
             let path_name = if is_full_path {
                 path_key.to_string()
