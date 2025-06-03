@@ -489,8 +489,7 @@ impl FastaIndex {
                             std::fs::read_to_string(&fai_path)?
                         }
                         Err(e) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Other,
+                            return Err(io::Error::other(
                                 format!("Failed to create FASTA index for '{}': {}", fasta_path, e),
                             ));
                         }
@@ -773,8 +772,7 @@ fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
 
     // Use niffler to handle both compressed and uncompressed files
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
+        io::Error::other(
             format!("Failed to open reader for '{}': {}", gfa_path, e),
         )
     })?;
@@ -1164,8 +1162,7 @@ fn write_graph_to_gfa(
             let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
                 .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    std::io::Error::other(
                         format!("Failed to set threads: {:?}", e),
                     )
                 })?
@@ -1178,8 +1175,7 @@ fn write_graph_to_gfa(
             let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
                 .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    std::io::Error::other(
                         format!("Failed to set threads: {:?}", e),
                     )
                 })?
@@ -1204,7 +1200,7 @@ fn write_graph_to_gfa(
                 compression_format,
                 niffler::compression::Level::Six,
             )
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            .map_err(std::io::Error::other)?
         }
     };
 
