@@ -544,7 +544,7 @@ fn read_gfa_files(
                 let mut node_count = 0usize;
                 let mut edge_count = 0usize;
 
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     let line = line.trim();
                     if line.is_empty() || line.starts_with('#') {
                         continue;
@@ -610,15 +610,15 @@ fn read_gfa_files(
                                     if step_str.is_empty() {
                                         continue;
                                     }
-                                    let (node_str, orient) = if step_str.ends_with('+') {
-                                        (&step_str[..step_str.len() - 1], false)
-                                    } else if step_str.ends_with('-') {
-                                        (&step_str[..step_str.len() - 1], true)
+                                    let (node_str, orient) = if let Some(stripped) = step_str.strip_suffix('+') {
+                                        (stripped, false)
+                                    } else if let Some(stripped) = step_str.strip_suffix('-') {
+                                        (stripped, true)
                                     } else {
                                         warn!("Invalid step format: {}", step_str);
                                         continue;
                                     };
-
+                                    
                                     let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
                                         panic!("Invalid node ID in path: {}", node_str);
                                     });
@@ -685,7 +685,6 @@ fn read_gfa_files(
 
     // Unwrap the Arc/Mutex wrapper for path_key_ranges now that all threads have finished
     let path_map = Arc::try_unwrap(path_key_ranges)
-        .ok()
         .expect("More than one Arc pointer to path map")
         .into_inner()
         .unwrap();
