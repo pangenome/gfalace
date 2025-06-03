@@ -6,13 +6,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bstr = "1.11.0"
-niffler = { version = "2.7.0", default-features = false, features = ["bz2", "gz", "zstd"] } # lzma conflicts with lzma in rust-htslib
+bstr = "1.12.0"
+niffler = { version = "3.0.0", default-features = false, features = ["bgz", "gz", "zstd"] } # lzma conflicts with lzma in rust-htslib
+bgzip = { version = "0.3.1", features = ["flate2"] } # To avoid bgzip trying to find flat2
 clap = { version = "4.5.39", features = ["derive"] }
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 bitvec = "1.0.1"
-tempfile = "3.14.0"
-rustc-hash = "2.1.0"
+tempfile = "3.20.0"
+rustc-hash = "2.1.1"
 log = "0.4.27"
 env_logger = "0.11.8"
 rayon = "1.10.0"
