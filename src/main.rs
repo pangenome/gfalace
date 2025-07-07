@@ -561,7 +561,7 @@ fn read_gfa_files(
                                 std::process::exit(1);
                             }
                             let node_id: u64 = fields[1].parse().unwrap_or_else(|_| {
-                                error!("Invalid node ID: {}", fields[1]);
+                                error!("Invalid node ID {} in line {}", fields[1], line);
                                 std::process::exit(1);
                             });
                             let sequence = fields[2].as_bytes();
@@ -582,12 +582,12 @@ fn read_gfa_files(
                             }
 
                             let from_id: u64 = fields[1].parse().unwrap_or_else(|_| {
-                                error!("Invalid from node ID: {}", fields[1]);
+                                error!("Invalid from node ID {} in line {}", fields[1], line);
                                 std::process::exit(1);
                             });
                             let from_rev = fields[2] == "-";
                             let to_id: u64 = fields[3].parse().unwrap_or_else(|_| {
-                                error!("Invalid to node ID: {}", fields[3]);
+                                error!("Invalid to node ID {} in line {}", fields[3], line);
                                 std::process::exit(1);
                             });
                             let to_rev = fields[4] == "-";
@@ -609,21 +609,25 @@ fn read_gfa_files(
                                 let mut translated_steps = Vec::new();
                                 for step_str in nodes_str.split(',') {
                                     if step_str.is_empty() {
-                                        error!("Empty step in path: {}", path_name);
+                                        error!("Empty step in path {} in line {}", path_name, line);
                                         std::process::exit(1);
                                     }
-                                    let (node_str, orient) =
-                                        if let Some(stripped) = step_str.strip_suffix('+') {
-                                            (stripped, false)
-                                        } else if let Some(stripped) = step_str.strip_suffix('-') {
-                                            (stripped, true)
-                                        } else {
-                                            error!("Invalid step format: {}", step_str);
-                                            std::process::exit(1);
-                                        };
+                                    let (node_str, orient) = if let Some(stripped) =
+                                        step_str.strip_suffix('+')
+                                    {
+                                        (stripped, false)
+                                    } else if let Some(stripped) = step_str.strip_suffix('-') {
+                                        (stripped, true)
+                                    } else {
+                                        error!("Invalid step format {} in line {}", step_str, line);
+                                        std::process::exit(1);
+                                    };
 
                                     let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
-                                        error!("Invalid node ID in path: {}", node_str);
+                                        error!(
+                                            "Invalid node ID in path {} in line {}",
+                                            path_name, line
+                                        );
                                         std::process::exit(1);
                                     });
 
