@@ -9,7 +9,7 @@ edition = "2021"
 bstr = "1.12.0"
 niffler = { version = "3.0.0", default-features = false, features = ["bgz", "gz", "zstd"] } # lzma conflicts with lzma in rust-htslib
 bgzip = { version = "0.3.1", features = ["flate2"] } # To avoid bgzip trying to find flat2
-clap = { version = "4.5.39", features = ["derive"] }
+clap = { version = "4.5.40", features = ["derive"] }
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 bitvec = "1.0.1"
 tempfile = "3.20.0"
@@ -19,7 +19,7 @@ env_logger = "0.11.8"
 rayon = "1.10.0"
 gzp = "1.0.1"
 zstd = { version = "0.13.3", features = ["zstdmt"] }
-flate2 = "1.1.1"
+flate2 = "1.1.2"
 
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 libc = "0.2.172"
