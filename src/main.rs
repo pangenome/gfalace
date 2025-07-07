@@ -5,6 +5,7 @@ use log::{debug, error, info, warn};
 use niffler::compression::Format;
 use rust_htslib::faidx;
 use rustc_hash::{FxHashMap, FxHashSet};
+
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
@@ -551,19 +552,16 @@ fn read_gfa_files(
                     }
 
                     let fields: Vec<&str> = line.split('\t').collect();
-                    if fields.is_empty() {
-                        continue;
-                    }
-
                     match fields[0] {
                         "S" => {
                             // Segment line: S <sid> <seq> [<tag>]*
                             if fields.len() < 3 {
-                                warn!("Invalid S line: {}", line);
-                                continue;
+                                error!("Invalid S line: {}", line);
+                                std::process::exit(1);
                             }
                             let node_id: u64 = fields[1].parse().unwrap_or_else(|_| {
-                                panic!("Invalid node ID: {}", fields[1]);
+                                error!("Invalid node ID: {}", fields[1]);
+                                std::process::exit(1);
                             });
                             let sequence = fields[2].as_bytes();
 
@@ -578,16 +576,18 @@ fn read_gfa_files(
                         "L" => {
                             // Link line: L <sid1> <orient1> <sid2> <orient2> <overlap>
                             if fields.len() < 6 {
-                                warn!("Invalid L line: {}", line);
-                                continue;
+                                error!("Invalid L line: {}", line);
+                                std::process::exit(1);
                             }
 
                             let from_id: u64 = fields[1].parse().unwrap_or_else(|_| {
-                                panic!("Invalid from node ID: {}", fields[1]);
+                                error!("Invalid from node ID: {}", fields[1]);
+                                std::process::exit(1);
                             });
                             let from_rev = fields[2] == "-";
                             let to_id: u64 = fields[3].parse().unwrap_or_else(|_| {
-                                panic!("Invalid to node ID: {}", fields[3]);
+                                error!("Invalid to node ID: {}", fields[3]);
+                                std::process::exit(1);
                             });
                             let to_rev = fields[4] == "-";
                             temp_edges.push(CompactEdge::new(from_id, from_rev, to_id, to_rev));
@@ -596,8 +596,8 @@ fn read_gfa_files(
                         "P" => {
                             // Path line: P <pname> <nodes> <overlaps>
                             if fields.len() < 3 {
-                                warn!("Invalid P line: {}", line);
-                                continue;
+                                error!("Invalid P line: {}", line);
+                                std::process::exit(1);
                             }
                             let path_name = fields[1];
                             let nodes_str = fields[2];
@@ -608,19 +608,21 @@ fn read_gfa_files(
                                 let mut translated_steps = Vec::new();
                                 for step_str in nodes_str.split(',') {
                                     if step_str.is_empty() {
-                                        continue;
+                                        error!("Empty step in path: {}", path_name);
+                                        std::process::exit(1);
                                     }
                                     let (node_str, orient) = if let Some(stripped) = step_str.strip_suffix('+') {
                                         (stripped, false)
                                     } else if let Some(stripped) = step_str.strip_suffix('-') {
                                         (stripped, true)
                                     } else {
-                                        warn!("Invalid step format: {}", step_str);
-                                        continue;
+                                        error!("Invalid step format: {}", step_str);
+                                        std::process::exit(1);
                                     };
                                     
                                     let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
-                                        panic!("Invalid node ID in path: {}", node_str);
+                                        error!("Invalid node ID in path: {}", node_str);
+                                        std::process::exit(1);
                                     });
 
                                     // Use the translation map to get the new node ID
@@ -629,10 +631,11 @@ fn read_gfa_files(
                                     {
                                         translated_steps.push(Handle::pack(translated_id, orient));
                                     } else {
-                                        warn!(
+                                        error!(
                                             "Node {} in path {} not found in translation map",
                                             node_id, path_name
                                         );
+                                        std::process::exit(1);
                                     }
                                 }
                                 if !translated_steps.is_empty() {
@@ -924,7 +927,8 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                         steps_to_remove.push(idx);
                     } else {
                         if step_to_split.is_some() {
-                            panic!("Error: More than one step is partially overlapping, which is not allowed.");
+                            error!("Error: More than one step is partially overlapping, which is not allowed.");
+                            std::process::exit(1);
                         }
                         step_to_split = Some(idx);
                     }
