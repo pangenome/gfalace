@@ -490,9 +490,10 @@ impl FastaIndex {
                             std::fs::read_to_string(&fai_path)?
                         }
                         Err(e) => {
-                            return Err(io::Error::other(
-                                format!("Failed to create FASTA index for '{}': {}", fasta_path, e),
-                            ));
+                            return Err(io::Error::other(format!(
+                                "Failed to create FASTA index for '{}': {}",
+                                fasta_path, e
+                            )));
                         }
                     }
                 }
@@ -611,15 +612,16 @@ fn read_gfa_files(
                                         error!("Empty step in path: {}", path_name);
                                         std::process::exit(1);
                                     }
-                                    let (node_str, orient) = if let Some(stripped) = step_str.strip_suffix('+') {
-                                        (stripped, false)
-                                    } else if let Some(stripped) = step_str.strip_suffix('-') {
-                                        (stripped, true)
-                                    } else {
-                                        error!("Invalid step format: {}", step_str);
-                                        std::process::exit(1);
-                                    };
-                                    
+                                    let (node_str, orient) =
+                                        if let Some(stripped) = step_str.strip_suffix('+') {
+                                            (stripped, false)
+                                        } else if let Some(stripped) = step_str.strip_suffix('-') {
+                                            (stripped, true)
+                                        } else {
+                                            error!("Invalid step format: {}", step_str);
+                                            std::process::exit(1);
+                                        };
+
                                     let node_id: u64 = node_str.parse().unwrap_or_else(|_| {
                                         error!("Invalid node ID in path: {}", node_str);
                                         std::process::exit(1);
@@ -774,9 +776,7 @@ fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
 
     // Use niffler to handle both compressed and uncompressed files
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(
-            format!("Failed to open reader for '{}': {}", gfa_path, e),
-        )
+        io::Error::other(format!("Failed to open reader for '{}': {}", gfa_path, e))
     })?;
 
     // Return a BufReader wrapping the niffler reader
@@ -1164,11 +1164,7 @@ fn write_graph_to_gfa(
             // Use parallel gzip compression
             let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
-                .map_err(|e| {
-                    std::io::Error::other(
-                        format!("Failed to set threads: {:?}", e),
-                    )
-                })?
+                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
                 .compression_level(flate2::Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
@@ -1177,11 +1173,7 @@ fn write_graph_to_gfa(
             // Use parallel BGZF compression
             let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
-                .map_err(|e| {
-                    std::io::Error::other(
-                        format!("Failed to set threads: {:?}", e),
-                    )
-                })?
+                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
                 .compression_level(flate2::Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
