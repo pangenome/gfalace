@@ -342,6 +342,7 @@ impl CompactEdge {
 struct SequenceStore {
     sequences_file: File,
     offsets: Vec<(u64, u32)>, // (offset, length) for each node
+    annotations: Vec<Vec<String>>, // annotation fields for each node
 }
 
 impl SequenceStore {
@@ -357,15 +358,17 @@ impl SequenceStore {
         Ok(SequenceStore {
             sequences_file,
             offsets: Vec::new(),
+            annotations: Vec::new(),
         })
     }
 
-    fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
+    fn add_sequence(&mut self, seq: &[u8], annotations: Vec<String>) -> io::Result<usize> {
         let offset = self.sequences_file.seek(SeekFrom::End(0))?;
         self.sequences_file.write_all(seq)?;
 
         let idx = self.offsets.len();
         self.offsets.push((offset, seq.len() as u32));
+        self.annotations.push(annotations);
         Ok(idx)
     }
 
@@ -385,6 +388,10 @@ impl SequenceStore {
 
         Ok(buffer)
     }
+
+    fn get_annotations(&self, idx: usize) -> Option<&Vec<String>> {
+        self.annotations.get(idx)
+    }
 }
 
 // Simplified graph structure
@@ -403,8 +410,8 @@ impl CompactGraph {
         })
     }
 
-    fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
-        self.sequence_store.add_sequence(seq)?;
+    fn add_node(&mut self, seq: &[u8], annotations: Vec<String>) -> io::Result<u64> {
+        self.sequence_store.add_sequence(seq, annotations)?;
         self.node_count += 1;
         Ok(self.node_count) // Return the actual node ID (1-based as per handlegraph convention)
     }
@@ -430,6 +437,10 @@ impl CompactGraph {
         } else {
             seq
         })
+    }
+
+    fn get_annotations(&self, node_id: u64) -> Option<&Vec<String>> {
+        self.sequence_store.get_annotations((node_id - 1) as usize)
     }
 }
 
@@ -566,10 +577,17 @@ fn read_gfa_files(
                             });
                             let sequence = fields[2].as_bytes();
 
+                            // Capture annotation fields (everything after sequence)
+                            let annotations = if fields.len() > 3 {
+                                fields[3..].iter().map(|s| s.to_string()).collect()
+                            } else {
+                                Vec::new()
+                            };
+
                             // one node at a time – keeps memory low
                             let new_node_id = {
                                 let mut graph = combined_graph.lock().unwrap();
-                                graph.add_node(sequence).unwrap()
+                                graph.add_node(sequence, annotations).unwrap()
                             };
                             id_translation.insert(NodeId::from(node_id), NodeId::from(new_node_id));
                             node_count += 1;
@@ -988,10 +1006,10 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                         // Keep left part
                         let new_seq = node_seq[0..overlap_start_offset].to_vec();
 
-                        // Add node with lock
+                        // Add node with lock (split nodes don't inherit annotations)
                         let node_id = {
                             let mut graph = graph_mutex.lock().unwrap();
-                            graph.add_node(&new_seq).unwrap()
+                            graph.add_node(&new_seq, Vec::new()).unwrap()
                         }; // Lock released here
 
                         let new_node = Handle::pack(NodeId::from(node_id), false);
@@ -1011,10 +1029,10 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                         // Keep right part
                         let new_seq = node_seq[overlap_end_offset..].to_vec();
 
-                        // Add node with lock
+                        // Add node with lock (split nodes don't inherit annotations)
                         let node_id = {
                             let mut graph = graph_mutex.lock().unwrap();
-                            graph.add_node(&new_seq).unwrap()
+                            graph.add_node(&new_seq, Vec::new()).unwrap()
                         }; // Lock released here
 
                         let new_node = Handle::pack(NodeId::from(node_id), false);
@@ -1222,7 +1240,20 @@ fn write_graph_to_gfa(
                 combined_graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
             let sequence_str =
                 String::from_utf8(sequence).expect("Node sequence contains invalid UTF-8");
-            writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
+            
+            // Get annotations for this node
+            let annotations = combined_graph.get_annotations(node_id);
+            
+            // Write segment with annotations
+            if let Some(annotations) = annotations {
+                if annotations.is_empty() {
+                    writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
+                } else {
+                    writeln!(file, "S\t{}\t{}\t{}", new_id, sequence_str, annotations.join("\t"))?;
+                }
+            } else {
+                writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
+            }
 
             new_id += 1;
         }
