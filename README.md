@@ -1,3 +1,9 @@
+# ⚠️ DEPRECATED: This repository has been replaced by `[impg](https://github.com/pangenome/impg) lace`.
+
+**Please use the [impg](https://github.com/pangenome/impg) repository for future development and updates.**
+
+---
+
 # GFALace
 
 GFALace is a Rust tool that combines multiple GFA (Graphical Fragment Assembly) files into a single unified graph. It's designed for working with pangenome graphs that have been split into multiple files, where each file represents a specific pangenomic region.
