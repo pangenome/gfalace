@@ -1,4 +1,4 @@
-# ⚠️ DEPRECATED: This repository has been replaced by `[impg](https://github.com/pangenome/impg) lace`.
+# ⚠️ DEPRECATED: This repository has been replaced by `impg lace`.
 
 **Please use the [impg](https://github.com/pangenome/impg) repository for future development and updates.**
 
